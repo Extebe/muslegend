@@ -3,7 +3,7 @@ import { Users, PlayCircle, LogOut, Copy, Check, Wifi, WifiOff, AlertCircle, Che
 import io from 'socket.io-client';
 
 // Configuration Socket.io
-const SOCKET_URL = process.env.REACT_APP_SOCKET_URL || window.location.origin;
+const SOCKET_URL = window.location.origin;
 let socket = null;
 
 const MusGame = () => {
@@ -524,3 +524,4 @@ const MusGame = () => {
 };
 
 export default MusGame;
+
