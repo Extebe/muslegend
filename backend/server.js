@@ -3,6 +3,7 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
+const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
@@ -15,7 +16,7 @@ const io = socketIo(server, {
 
 app.use(cors());
 app.use(express.json());
-
+app.use(express.static(path.join(__dirname, '../frontend/build')));
 // ==================== ï¿½TAT DU JEU ====================
 
 const rooms = new Map(); // roomId => Room
@@ -448,6 +449,10 @@ app.get('/stats', (req, res) => {
   });
 });
 
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
+});
+
 // ==================== Dï¿½MARRAGE DU SERVEUR ====================
 
 const PORT = process.env.PORT || 3001;
@@ -475,4 +480,5 @@ process.on('SIGINT', () => {
     console.log('Serveur fermï¿½ proprement');
     process.exit(0);
   });
+
 });
