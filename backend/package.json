@@ -1,7 +1,7 @@
 {
-  "name": "mus-basque-server",
-  "version": "1.0.0",
-  "description": "Serveur backend pour le jeu de Mus Basque en ligne",
+  "name": "mus-basque-server-improved",
+  "version": "2.0.0",
+  "description": "Serveur backend pour le jeu de Mus Basque - Sprints 3, 4, 5",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -13,9 +13,10 @@
     "basque",
     "card-game",
     "websocket",
-    "multiplayer"
+    "multiplayer",
+    "betting"
   ],
-  "author": "Votre nom",
+  "author": "Mus Basque Team",
   "license": "MIT",
   "dependencies": {
     "express": "^4.18.2",
