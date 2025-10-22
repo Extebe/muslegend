@@ -1,8 +1,9 @@
-// server.js - Backend Node.js pour le jeu de Mus Basque
+// server.js - Backend Sprint 2 - Game Logic complète + Sprints 3, 4, 5
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
+const path = require('path'); // ← AJOUTÉ !
 
 const app = express();
 const server = http.createServer(app);
@@ -15,31 +16,62 @@ const io = socketIo(server, {
 
 app.use(cors());
 app.use(express.json());
+app.use(express.static(path.join(__dirname, '../frontend/build')));
 
-// ==================== ï¿½TAT DU JEU ====================
+// ==================== CONFIGURATION ====================
+const GAME_CONFIG = {
+  MAX_PLAYERS: 4,
+  RECONNECT_TIMEOUT: 60000,
+  ACTION_TIMEOUT: 45000,
+  DEFAULT_WIN_SCORE: 40,
+  BET_VALUES: [1, 2, 3, 4, 5],
+  MAX_KANTA: 3
+};
 
-const rooms = new Map(); // roomId => Room
-const playerSockets = new Map(); // socketId => { roomId, playerId }
+// ==================== ÉTAT DU JEU ====================
+const rooms = new Map();
+const playerSockets = new Map();
 
 class Room {
-  constructor(roomId, creatorSocketId, creatorName) {
+  constructor(roomId, creatorSocketId, creatorName, config = {}) {
     this.roomId = roomId;
     this.players = [];
-    this.state = 'WAITING'; // WAITING, LOBBY, MUS_DECISION, GRAND, PETIT, PAIRES, JEU, PUNTUAK, FINISHED
+    this.state = 'WAITING';
     this.teams = { A: [], B: [] };
     this.dealerPosition = 0;
-    this.currentTurn = 0;
+    this.manoPosition = 0;
+    this.currentPhase = null;
     this.deck = [];
-    this.playerCards = {}; // playerId => [cards]
-    this.musVotes = {}; // playerId => boolean
+    this.playerCards = {};
+    this.musVotes = {};
     this.scores = { A: 0, B: 0 };
-    this.currentBet = null;
+    this.winScore = config.winScore || GAME_CONFIG.DEFAULT_WIN_SCORE;
+    this.phaseResults = {};
+    this.currentPhaseIndex = 0;
+    this.phases = ['GRAND', 'PETIT', 'PAIRES', 'JEU'];
+    
+    this.bettingState = {
+      phase: null,
+      currentBet: 0,
+      totalStake: 0,
+      bets: [],
+      currentBettorIndex: 0,
+      hordago: false,
+      kantaCount: 0,
+      passed: new Set()
+    };
+    
+    this.history = [];
+    this.roundHistory = [];
+    this.gameStartTime = null;
+    this.actionTimers = new Map();
+    this.lastActivity = Date.now();
     
     this.addPlayer(creatorSocketId, creatorName);
   }
 
   addPlayer(socketId, name) {
-    if (this.players.length >= 4) {
+    if (this.players.length >= GAME_CONFIG.MAX_PLAYERS) {
       return { success: false, error: 'Salle pleine' };
     }
 
@@ -48,12 +80,17 @@ class Room {
       socketId,
       name,
       position: this.players.length,
-      connected: true
+      connected: true,
+      lastSeen: Date.now(),
+      stats: {
+        roundsWon: 0,
+        pointsScored: 0,
+        betsWon: 0
+      }
     };
 
     this.players.push(player);
 
-    // Auto-attribution des ï¿½quipes quand 4 joueurs
     if (this.players.length === 4) {
       this.assignTeams();
       this.state = 'LOBBY';
@@ -66,7 +103,6 @@ class Room {
     const playerIndex = this.players.findIndex(p => p.socketId === socketId);
     if (playerIndex !== -1) {
       this.players.splice(playerIndex, 1);
-      // Rï¿½assigner les positions
       this.players.forEach((p, idx) => {
         p.position = idx;
         p.id = idx;
@@ -80,14 +116,12 @@ class Room {
   }
 
   assignTeams() {
-    // ï¿½quipe A: positions 0 et 2
-    // ï¿½quipe B: positions 1 et 3
     this.teams.A = [this.players[0], this.players[2]];
     this.teams.B = [this.players[1], this.players[3]];
   }
 
   createDeck() {
-    const suits = ['?', '<3', '?', '?'];
+    const suits = ['♠', '♥', '♣', '♦'];
     const values = [
       { name: 'As', grandValue: 1, petitValue: 1, gameValue: 1 },
       { name: '2', grandValue: 2, petitValue: 2, gameValue: 2 },
@@ -108,7 +142,6 @@ class Room {
       }
     }
     
-    // Mï¿½langer le paquet
     for (let i = this.deck.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [this.deck[i], this.deck[j]] = [this.deck[j], this.deck[i]];
@@ -132,34 +165,429 @@ class Room {
   handleMusVote(playerId, wantsMus) {
     this.musVotes[playerId] = wantsMus;
     
-    // Si tous ont votï¿½
     if (Object.keys(this.musVotes).length === 4) {
       const allWantMus = Object.values(this.musVotes).every(v => v === true);
       
       if (allWantMus) {
-        // Redistribuer les cartes
         this.distributeCards();
         this.startMusDecision();
         return { action: 'REDISTRIBUTE', allWantMus: true };
       } else {
-        // Commencer la phase Grand
-        this.state = 'GRAND';
-        return { action: 'START_GRAND', allWantMus: false };
+        this.startBettingPhase('GRAND');
+        return { action: 'START_BETTING', phase: 'GRAND' };
       }
     }
     
     return { action: 'WAITING', votesCount: Object.keys(this.musVotes).length };
   }
 
+  // ==================== SPRINT 3: SYSTÈME DE MISES ====================
+  
+  startBettingPhase(phase) {
+    this.state = `BETTING_${phase}`;
+    this.currentPhase = phase;
+    this.bettingState = {
+      phase,
+      currentBet: 0,
+      totalStake: 0,
+      bets: [],
+      currentBettorIndex: this.manoPosition,
+      hordago: false,
+      kantaCount: 0,
+      passed: new Set(),
+      activePlayers: [0, 1, 2, 3]
+    };
+    
+    this.logAction('BETTING_START', { phase, mano: this.manoPosition });
+  }
+
+  handleBet(playerId, betType, betValue = null) {
+    const bs = this.bettingState;
+    
+    if (this.players[bs.currentBettorIndex].id !== playerId) {
+      return { success: false, error: 'Pas votre tour' };
+    }
+
+    let betResult = null;
+
+    switch (betType) {
+      case 'PASO':
+        bs.passed.add(playerId);
+        betResult = this.handlePaso(playerId);
+        break;
+        
+      case 'IMIDO':
+        betResult = this.handleImido(playerId);
+        break;
+        
+      case 'KANTA':
+        if (bs.kantaCount >= GAME_CONFIG.MAX_KANTA) {
+          return { success: false, error: 'Trop de relances' };
+        }
+        betResult = this.handleKanta(playerId, betValue);
+        break;
+        
+      case 'HORDAGO':
+        betResult = this.handleHordago(playerId);
+        break;
+        
+      case 'BET':
+        if (!GAME_CONFIG.BET_VALUES.includes(betValue)) {
+          return { success: false, error: 'Mise invalide' };
+        }
+        betResult = this.handleInitialBet(playerId, betValue);
+        break;
+        
+      default:
+        return { success: false, error: 'Action invalide' };
+    }
+
+    this.logAction('BET', { playerId, betType, betValue, result: betResult });
+    
+    return { success: true, ...betResult };
+  }
+
+  handlePaso(playerId) {
+    const bs = this.bettingState;
+    
+    if (bs.bets.length === 0) {
+      this.nextBettor();
+      return { action: 'NEXT_BETTOR', passed: true };
+    }
+    
+    bs.activePlayers = bs.activePlayers.filter(p => p !== playerId);
+    
+    if (this.isBettingPhaseComplete()) {
+      return this.completeBettingPhase();
+    }
+    
+    this.nextBettor();
+    return { action: 'NEXT_BETTOR', passed: true };
+  }
+
+  handleImido(playerId) {
+    const bs = this.bettingState;
+    bs.bets.push({ playerId, type: 'IMIDO', value: bs.currentBet });
+    
+    if (this.isBettingPhaseComplete()) {
+      return this.completeBettingPhase();
+    }
+    
+    this.nextBettor();
+    return { action: 'NEXT_BETTOR', accepted: true };
+  }
+
+  handleKanta(playerId, betValue) {
+    const bs = this.bettingState;
+    const raise = betValue || (bs.currentBet + 1);
+    
+    bs.bets.push({ playerId, type: 'KANTA', value: raise });
+    bs.currentBet = raise;
+    bs.kantaCount++;
+    bs.passed.clear();
+    
+    this.nextBettor();
+    return { action: 'RAISED', newBet: raise };
+  }
+
+  handleHordago(playerId) {
+    const bs = this.bettingState;
+    bs.hordago = true;
+    bs.bets.push({ playerId, type: 'HORDAGO', value: 'ALL' });
+    
+    return { action: 'HORDAGO', resolveAll: true };
+  }
+
+  handleInitialBet(playerId, betValue) {
+    const bs = this.bettingState;
+    bs.bets.push({ playerId, type: 'BET', value: betValue });
+    bs.currentBet = betValue;
+    
+    this.nextBettor();
+    return { action: 'BET_PLACED', bet: betValue };
+  }
+
+  nextBettor() {
+    const bs = this.bettingState;
+    do {
+      bs.currentBettorIndex = (bs.currentBettorIndex + 1) % 4;
+    } while (!bs.activePlayers.includes(bs.currentBettorIndex));
+  }
+
+  isBettingPhaseComplete() {
+    const bs = this.bettingState;
+    
+    if (bs.hordago) return true;
+    if (bs.activePlayers.length === 1) return true;
+    
+    const spokeCount = bs.bets.length + bs.passed.size;
+    if (spokeCount >= 4 && bs.passed.size < 4) return true;
+    
+    return false;
+  }
+
+  completeBettingPhase() {
+    const bs = this.bettingState;
+    
+    const phaseWinner = this.determinePhaseWinner(bs.phase);
+    
+    let pointsWon = bs.currentBet || 1;
+    if (bs.hordago) {
+      pointsWon = this.winScore - Math.max(this.scores.A, this.scores.B);
+    }
+    
+    if (phaseWinner.winner) {
+      this.scores[phaseWinner.winner] += pointsWon;
+      this.players.forEach(p => {
+        const team = p.position % 2 === 0 ? 'A' : 'B';
+        if (team === phaseWinner.winner) {
+          p.stats.pointsScored += pointsWon;
+          p.stats.betsWon++;
+        }
+      });
+    }
+    
+    this.phaseResults[bs.phase] = {
+      winner: phaseWinner.winner,
+      points: pointsWon,
+      details: phaseWinner.details,
+      bets: bs.bets
+    };
+    
+    if (bs.hordago) {
+      return this.endRound();
+    }
+    
+    return this.moveToNextPhase();
+  }
+
+  detectPaires(cards) {
+    const valueCounts = {};
+    cards.forEach(card => {
+      const val = card.name;
+      valueCounts[val] = (valueCounts[val] || 0) + 1;
+    });
+
+    const counts = Object.values(valueCounts).sort((a, b) => b - a);
+    
+    if (counts[0] === 4) {
+      return { type: 'ZORTZIKOAK', value: 40, name: 'Zortzikoak' };
+    }
+    
+    if (counts[0] === 2 && counts[1] === 2) {
+      return { type: 'DUPLES', value: 3, name: 'Duples' };
+    }
+    
+    if (counts[0] === 2) {
+      const pairValue = Object.keys(valueCounts).find(k => valueCounts[k] === 2);
+      if (pairValue === 'R' || pairValue === '3') {
+        return { type: 'MEDIAS', value: 2, name: `Médias (${pairValue})` };
+      }
+      return { type: 'PAR', value: 1, name: `Paire de ${pairValue}` };
+    }
+    
+    return { type: 'NONE', value: 0, name: 'Pas de paire' };
+  }
+
+  calculateJeu(cards) {
+    const total = cards.reduce((sum, card) => sum + card.gameValue, 0);
+    return {
+      total,
+      hasJeu: total >= 31,
+      points: total >= 31 ? (total === 31 ? 3 : total === 32 ? 2 : 1) : 0
+    };
+  }
+
+  determinePhaseWinner(phase) {
+    const teamACards = [
+      ...this.playerCards[this.teams.A[0].id],
+      ...this.playerCards[this.teams.A[1].id]
+    ];
+    const teamBCards = [
+      ...this.playerCards[this.teams.B[0].id],
+      ...this.playerCards[this.teams.B[1].id]
+    ];
+
+    let result = 0;
+    let details = {};
+
+    switch(phase) {
+      case 'GRAND':
+        const bestA_Grand = Math.max(
+          Math.max(...this.playerCards[this.teams.A[0].id].map(c => c.grandValue)),
+          Math.max(...this.playerCards[this.teams.A[1].id].map(c => c.grandValue))
+        );
+        const bestB_Grand = Math.max(
+          Math.max(...this.playerCards[this.teams.B[0].id].map(c => c.grandValue)),
+          Math.max(...this.playerCards[this.teams.B[1].id].map(c => c.grandValue))
+        );
+        result = bestA_Grand > bestB_Grand ? 1 : (bestA_Grand < bestB_Grand ? -1 : 0);
+        details = { teamA: bestA_Grand, teamB: bestB_Grand };
+        break;
+
+      case 'PETIT':
+        const bestA_Petit = Math.min(
+          Math.min(...this.playerCards[this.teams.A[0].id].map(c => c.petitValue)),
+          Math.min(...this.playerCards[this.teams.A[1].id].map(c => c.petitValue))
+        );
+        const bestB_Petit = Math.min(
+          Math.min(...this.playerCards[this.teams.B[0].id].map(c => c.petitValue)),
+          Math.min(...this.playerCards[this.teams.B[1].id].map(c => c.petitValue))
+        );
+        result = bestA_Petit < bestB_Petit ? 1 : (bestA_Petit > bestB_Petit ? -1 : 0);
+        details = { teamA: bestA_Petit, teamB: bestB_Petit };
+        break;
+
+      case 'PAIRES':
+        const pairesA1 = this.detectPaires(this.playerCards[this.teams.A[0].id]);
+        const pairesA2 = this.detectPaires(this.playerCards[this.teams.A[1].id]);
+        const pairesB1 = this.detectPaires(this.playerCards[this.teams.B[0].id]);
+        const pairesB2 = this.detectPaires(this.playerCards[this.teams.B[1].id]);
+        
+        const bestPairesA = pairesA1.value > pairesA2.value ? pairesA1 : pairesA2;
+        const bestPairesB = pairesB1.value > pairesB2.value ? pairesB1 : pairesB2;
+        
+        result = bestPairesA.value > bestPairesB.value ? 1 : (bestPairesA.value < bestPairesB.value ? -1 : 0);
+        details = { teamA: bestPairesA, teamB: bestPairesB };
+        break;
+
+      case 'JEU':
+        const jeuA1 = this.calculateJeu(this.playerCards[this.teams.A[0].id]);
+        const jeuA2 = this.calculateJeu(this.playerCards[this.teams.A[1].id]);
+        const jeuB1 = this.calculateJeu(this.playerCards[this.teams.B[0].id]);
+        const jeuB2 = this.calculateJeu(this.playerCards[this.teams.B[1].id]);
+        
+        const bestJeuA = jeuA1.total > jeuA2.total ? jeuA1 : jeuA2;
+        const bestJeuB = jeuB1.total > jeuB2.total ? jeuB1 : jeuB2;
+        
+        if (!bestJeuA.hasJeu && !bestJeuB.hasJeu) {
+          return { winner: null, goPuntuak: true, details };
+        }
+        
+        if (bestJeuA.hasJeu && !bestJeuB.hasJeu) result = 1;
+        else if (!bestJeuA.hasJeu && bestJeuB.hasJeu) result = -1;
+        else result = bestJeuA.total > bestJeuB.total ? 1 : (bestJeuA.total < bestJeuB.total ? -1 : 0);
+        
+        details = { teamA: bestJeuA, teamB: bestJeuB };
+        break;
+
+      case 'PUNTUAK':
+        const totalA = this.playerCards[this.teams.A[0].id].reduce((s, c) => s + c.gameValue, 0) +
+                       this.playerCards[this.teams.A[1].id].reduce((s, c) => s + c.gameValue, 0);
+        const totalB = this.playerCards[this.teams.B[0].id].reduce((s, c) => s + c.gameValue, 0) +
+                       this.playerCards[this.teams.B[1].id].reduce((s, c) => s + c.gameValue, 0);
+        
+        result = totalA > totalB ? 1 : (totalA < totalB ? -1 : 0);
+        details = { teamA: totalA, teamB: totalB };
+        break;
+    }
+
+    if (result === 0) {
+      const manoTeam = this.manoPosition % 2 === 0 ? 'A' : 'B';
+      result = manoTeam === 'A' ? 1 : -1;
+      details.tieBreaker = 'Mano';
+    }
+
+    const winner = result > 0 ? 'A' : 'B';
+    
+    return { winner, details, goPuntuak: false };
+  }
+
+  moveToNextPhase() {
+    this.currentPhaseIndex++;
+    
+    if (this.currentPhaseIndex >= this.phases.length) {
+      return this.endRound();
+    }
+
+    const nextPhase = this.phases[this.currentPhaseIndex];
+    this.startBettingPhase(nextPhase);
+    
+    return { nextPhase, phaseResult: this.phaseResults };
+  }
+
+  // ==================== SPRINT 4: FIN DE MANCHE & PARTIE ====================
+  
+  endRound() {
+    this.roundHistory.push({
+      timestamp: Date.now(),
+      scores: { ...this.scores },
+      phaseResults: { ...this.phaseResults }
+    });
+    
+    if (this.scores.A >= this.winScore || this.scores.B >= this.winScore) {
+      return this.endGame();
+    }
+    
+    this.dealerPosition = (this.dealerPosition + 1) % 4;
+    this.manoPosition = (this.manoPosition + 1) % 4;
+    this.phaseResults = {};
+    this.currentPhaseIndex = 0;
+    
+    this.state = 'ROUND_ENDED';
+    
+    return { 
+      action: 'ROUND_END',
+      scores: this.scores,
+      nextRound: true,
+      phaseResults: this.phaseResults
+    };
+  }
+
+  endGame() {
+    const winner = this.scores.A >= this.winScore ? 'A' : 'B';
+    const duration = Date.now() - this.gameStartTime;
+    
+    this.players.forEach(p => {
+      const team = p.position % 2 === 0 ? 'A' : 'B';
+      if (team === winner) {
+        p.stats.roundsWon++;
+      }
+    });
+    
+    this.state = 'GAME_ENDED';
+    
+    return {
+      action: 'GAME_END',
+      winner,
+      finalScores: this.scores,
+      duration,
+      stats: this.players.map(p => ({
+        name: p.name,
+        stats: p.stats
+      }))
+    };
+  }
+
+  startNewRound() {
+    this.distributeCards();
+    this.startMusDecision();
+    this.state = 'MUS_DECISION';
+  }
+
+  logAction(type, data) {
+    this.history.push({
+      timestamp: Date.now(),
+      type,
+      data
+    });
+    this.lastActivity = Date.now();
+  }
+
   getGameState(forPlayerId) {
+    const player = this.players.find(p => p.id === forPlayerId);
+    const team = player ? (player.position % 2 === 0 ? 'A' : 'B') : null;
+    
     return {
       roomId: this.roomId,
       state: this.state,
+      currentPhase: this.currentPhase,
       players: this.players.map(p => ({
         id: p.id,
         name: p.name,
         position: p.position,
-        connected: p.connected
+        connected: p.connected,
+        stats: p.stats
       })),
       teams: {
         A: this.teams.A.map(p => ({ id: p.id, name: p.name })),
@@ -167,17 +595,23 @@ class Room {
       },
       myCards: this.playerCards[forPlayerId] || [],
       myPosition: forPlayerId,
+      myTeam: team,
       dealerPosition: this.dealerPosition,
+      manoPosition: this.manoPosition,
       isDealer: forPlayerId === this.dealerPosition,
-      currentTurn: this.currentTurn,
+      isMano: forPlayerId === this.manoPosition,
       scores: this.scores,
+      winScore: this.winScore,
       musVotes: this.musVotes,
-      waitingForMus: this.state === 'MUS_DECISION' && !this.musVotes[forPlayerId]
+      phaseResults: this.phaseResults,
+      bettingState: this.bettingState,
+      waitingForMus: this.state === 'MUS_DECISION' && !this.musVotes[forPlayerId],
+      currentBettor: this.bettingState.currentBettorIndex,
+      isMyTurn: this.players[this.bettingState.currentBettorIndex]?.id === forPlayerId,
+      roundHistory: this.roundHistory.slice(-5)
     };
   }
 }
-
-// ==================== UTILITAIRES ====================
 
 function generateRoomId() {
   return Math.random().toString(36).substr(2, 6).toUpperCase();
@@ -186,29 +620,23 @@ function generateRoomId() {
 // ==================== WEBSOCKET HANDLERS ====================
 
 io.on('connection', (socket) => {
-  console.log(`[${new Date().toISOString()}] Nouveau client connectï¿½: ${socket.id}`);
+  console.log(`[${new Date().toISOString()}] Client connecté: ${socket.id}`);
 
-  // US1 & US2: Crï¿½er ou rejoindre une salle
-  socket.on('CREATE_ROOM', ({ playerName }) => {
+  socket.on('CREATE_ROOM', ({ playerName, config }) => {
     const roomId = generateRoomId();
-    const room = new Room(roomId, socket.id, playerName);
+    const room = new Room(roomId, socket.id, playerName, config);
     rooms.set(roomId, room);
     
-    playerSockets.set(socket.id, {
-      roomId,
-      playerId: 0
-    });
-
+    playerSockets.set(socket.id, { roomId, playerId: 0 });
     socket.join(roomId);
     
-    console.log(`[${roomId}] Salle crï¿½ï¿½e par ${playerName}`);
+    console.log(`[${roomId}] Salle créée par ${playerName}`);
     
     socket.emit('ROOM_CREATED', {
       roomId,
       gameState: room.getGameState(0)
     });
 
-    // Broadcaster l'ï¿½tat ï¿½ tous dans la salle
     io.to(roomId).emit('GAME_STATE_UPDATE', {
       gameState: room.getGameState(0)
     });
@@ -233,43 +661,35 @@ io.on('connection', (socket) => {
     playerSockets.set(socket.id, { roomId, playerId });
     socket.join(roomId);
 
-    console.log(`[${roomId}] ${playerName} a rejoint (joueur ${playerId})`);
+    console.log(`[${roomId}] ${playerName} a rejoint`);
 
-    // Envoyer l'ï¿½tat ï¿½ tous les joueurs
     room.players.forEach(player => {
       io.to(player.socketId).emit('GAME_STATE_UPDATE', {
         gameState: room.getGameState(player.id)
       });
     });
 
-    // US3: Si 4 joueurs, les ï¿½quipes sont auto-attribuï¿½es
     if (room.players.length === 4) {
-      io.to(roomId).emit('TEAMS_ASSIGNED', {
-        teams: room.teams
-      });
+      io.to(roomId).emit('TEAMS_ASSIGNED', { teams: room.teams });
     }
   });
 
-  // US4 & US5: Dï¿½marrer la partie (uniquement si 4 joueurs)
   socket.on('START_GAME', () => {
     const playerData = playerSockets.get(socket.id);
     if (!playerData) return;
 
     const room = rooms.get(playerData.roomId);
     if (!room || room.players.length !== 4) {
-      socket.emit('ERROR', { message: 'Impossible de dï¿½marrer: 4 joueurs requis' });
+      socket.emit('ERROR', { message: '4 joueurs requis' });
       return;
     }
 
-    // US8: Distribuer 4 cartes ï¿½ chaque joueur
+    room.gameStartTime = Date.now();
     room.distributeCards();
-    
-    // US10: Demander le Mus ï¿½ tous
     room.startMusDecision();
 
-    console.log(`[${room.roomId}] Partie dï¿½marrï¿½e - Distribution des cartes`);
+    console.log(`[${room.roomId}] Partie démarrée`);
 
-    // Envoyer les cartes ï¿½ chaque joueur individuellement
     room.players.forEach(player => {
       io.to(player.socketId).emit('GAME_STARTED', {
         gameState: room.getGameState(player.id)
@@ -277,103 +697,105 @@ io.on('connection', (socket) => {
     });
   });
 
-  // US9 & US10 & US11 & US12: Gestion du vote Mus
   socket.on('MUS_VOTE', ({ wantsMus }) => {
     const playerData = playerSockets.get(socket.id);
     if (!playerData) return;
 
     const room = rooms.get(playerData.roomId);
     if (!room || room.state !== 'MUS_DECISION') {
-      socket.emit('ERROR', { message: 'Action impossible dans cette phase' });
+      socket.emit('ERROR', { message: 'Action impossible' });
       return;
     }
 
     const result = room.handleMusVote(playerData.playerId, wantsMus);
 
-    console.log(`[${room.roomId}] Joueur ${playerData.playerId} vote Mus: ${wantsMus}`);
-
     if (result.action === 'REDISTRIBUTE') {
-      // US11: Tous acceptent le Mus - redistribuer
-      console.log(`[${room.roomId}] Tous acceptent le Mus - Redistribution`);
-      
       room.players.forEach(player => {
         io.to(player.socketId).emit('MUS_ACCEPTED', {
-          message: 'Tous les joueurs acceptent le Mus - Nouvelles cartes',
           gameState: room.getGameState(player.id)
         });
       });
-    } else if (result.action === 'START_GRAND') {
-      // US12: Un joueur refuse - commencer la phase Grand
-      console.log(`[${room.roomId}] Mus refusï¿½ - Dï¿½but de la phase Grand`);
-      
+    } else if (result.action === 'START_BETTING') {
       room.players.forEach(player => {
-        io.to(player.socketId).emit('MUS_REFUSED', {
-          message: 'Un joueur refuse le Mus - Dï¿½but du jeu',
+        io.to(player.socketId).emit('BETTING_STARTED', {
+          phase: result.phase,
           gameState: room.getGameState(player.id)
         });
       });
     } else {
-      // En attente d'autres votes
       room.players.forEach(player => {
         io.to(player.socketId).emit('GAME_STATE_UPDATE', {
-          gameState: room.getGameState(player.id),
-          message: `${result.votesCount}/4 joueurs ont votï¿½`
+          gameState: room.getGameState(player.id)
         });
       });
     }
   });
 
-  // US7: Quitter la partie proprement
+  socket.on('PLACE_BET', ({ betType, betValue }) => {
+    const playerData = playerSockets.get(socket.id);
+    if (!playerData) return;
+
+    const room = rooms.get(playerData.roomId);
+    if (!room) return;
+
+    const result = room.handleBet(playerData.playerId, betType, betValue);
+
+    if (!result.success) {
+      socket.emit('ERROR', { message: result.error });
+      return;
+    }
+
+    console.log(`[${room.roomId}] Mise: ${betType} ${betValue || ''}`);
+
+    room.players.forEach(player => {
+      io.to(player.socketId).emit('BET_UPDATE', {
+        betResult: result,
+        gameState: room.getGameState(player.id)
+      });
+    });
+
+    if (result.action === 'ROUND_END' || result.action === 'GAME_END') {
+      room.players.forEach(player => {
+        io.to(player.socketId).emit(result.action === 'GAME_END' ? 'GAME_ENDED' : 'ROUND_ENDED', {
+          ...result,
+          gameState: room.getGameState(player.id)
+        });
+      });
+    }
+  });
+
+  socket.on('START_NEW_ROUND', () => {
+    const playerData = playerSockets.get(socket.id);
+    if (!playerData) return;
+
+    const room = rooms.get(playerData.roomId);
+    if (!room || room.state !== 'ROUND_ENDED') return;
+
+    room.startNewRound();
+
+    room.players.forEach(player => {
+      io.to(player.socketId).emit('NEW_ROUND_STARTED', {
+        gameState: room.getGameState(player.id)
+      });
+    });
+  });
+
   socket.on('LEAVE_ROOM', () => {
     handlePlayerDisconnect(socket);
   });
 
-  // US36: Gï¿½rer les dï¿½connexions
   socket.on('disconnect', () => {
-    console.log(`[${new Date().toISOString()}] Client dï¿½connectï¿½: ${socket.id}`);
+    console.log(`Client déconnecté: ${socket.id}`);
     handlePlayerDisconnect(socket);
   });
 
-  // US35 & US37: Validation du tour et actions interdites
-  socket.on('PLAYER_ACTION', ({ action, data }) => {
-    const playerData = playerSockets.get(socket.id);
-    if (!playerData) {
-      socket.emit('ERROR', { message: 'Session invalide' });
-      return;
-    }
-
-    const room = rooms.get(playerData.roomId);
-    if (!room) {
-      socket.emit('ERROR', { message: 'Salle introuvable' });
-      return;
-    }
-
-    // Vï¿½rifier si c'est le tour du joueur
-    if (room.currentTurn !== playerData.playerId && room.state !== 'MUS_DECISION') {
-      socket.emit('ERROR', { 
-        message: 'Ce n\'est pas votre tour',
-        currentTurn: room.currentTurn 
-      });
-      return;
-    }
-
-    console.log(`[${room.roomId}] Action ${action} du joueur ${playerData.playerId}`);
-    
-    // Traitement des actions selon la phase
-    // (ï¿½ implï¿½menter dans les prochains sprints)
-  });
-
-  // Heartbeat pour maintenir la connexion
   socket.on('PING', () => {
     socket.emit('PONG');
   });
 });
 
-// ==================== GESTION DES Dï¿½CONNEXIONS ====================
-
 function handlePlayerDisconnect(socket) {
   const playerData = playerSockets.get(socket.id);
-  
   if (!playerData) return;
 
   const room = rooms.get(playerData.roomId);
@@ -382,41 +804,27 @@ function handlePlayerDisconnect(socket) {
   const player = room.players.find(p => p.id === playerData.playerId);
   if (player) {
     player.connected = false;
-    console.log(`[${room.roomId}] ${player.name} s'est dï¿½connectï¿½`);
     
-    // Notifier les autres joueurs
     io.to(playerData.roomId).emit('PLAYER_DISCONNECTED', {
       playerId: playerData.playerId,
       playerName: player.name
     });
 
-    // Attendre 60 secondes avant de retirer dï¿½finitivement
     setTimeout(() => {
       if (!player.connected) {
         room.removePlayer(socket.id);
-        console.log(`[${room.roomId}] ${player.name} retirï¿½ de la partie (timeout)`);
         
-        // Si moins de 4 joueurs, arrï¿½ter la partie
         if (room.players.length < 4) {
           io.to(playerData.roomId).emit('GAME_CANCELLED', {
-            message: 'Partie annulï¿½e - Pas assez de joueurs'
+            message: 'Partie annulée'
           });
           
-          // Si la salle est vide, la supprimer
           if (room.players.length === 0) {
             rooms.delete(playerData.roomId);
-            console.log(`[${playerData.roomId}] Salle supprimï¿½e`);
           }
-        } else {
-          // Mettre ï¿½ jour l'ï¿½tat pour les joueurs restants
-          room.players.forEach(p => {
-            io.to(p.socketId).emit('GAME_STATE_UPDATE', {
-              gameState: room.getGameState(p.id)
-            });
-          });
         }
       }
-    }, 60000); // 60 secondes
+    }, GAME_CONFIG.RECONNECT_TIMEOUT);
   }
 
   playerSockets.delete(socket.id);
@@ -448,31 +856,27 @@ app.get('/stats', (req, res) => {
   });
 });
 
-// ==================== Dï¿½MARRAGE DU SERVEUR ====================
+// Route catch-all pour servir le frontend
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
+});
+
+// ==================== DÉMARRAGE ====================
 
 const PORT = process.env.PORT || 3001;
 
 server.listen(PORT, () => {
   console.log('='.repeat(50));
-  console.log(`? Serveur MUS BASQUE dï¿½marrï¿½`);
-  console.log(`? Port: ${PORT}`);
-  console.log(`? Dï¿½marrï¿½ ï¿½: ${new Date().toISOString()}`);
+  console.log(`🎴 Serveur MUS BASQUE - v2.0`);
+  console.log(`🌐 Port: ${PORT}`);
+  console.log(`⏰ ${new Date().toISOString()}`);
   console.log('='.repeat(50));
 });
 
-// Nettoyage gracieux
 process.on('SIGTERM', () => {
-  console.log('SIGTERM reï¿½u, fermeture du serveur...');
-  server.close(() => {
-    console.log('Serveur fermï¿½ proprement');
-    process.exit(0);
-  });
+  server.close(() => process.exit(0));
 });
 
 process.on('SIGINT', () => {
-  console.log('SIGINT reï¿½u, fermeture du serveur...');
-  server.close(() => {
-    console.log('Serveur fermï¿½ proprement');
-    process.exit(0);
-  });
+  server.close(() => process.exit(0));
 });
