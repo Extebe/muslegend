@@ -15,33 +15,36 @@ const MusGame = () => {
   const [loading, setLoading] = useState(false);
   const [winScore, setWinScore] = useState(40);
   
+  // État pour MUS
+  const [selectedCards, setSelectedCards] = useState([]);
+  const [gehiagoAmount, setGehiagoAmount] = useState(2);
+  
   const [gameState, setGameState] = useState({
     roomId: null,
     state: 'WAITING',
     currentPhase: null,
     players: [],
-    teams: { A: [], B: [] },
+    teams: { AB: [], CD: [] },
     myCards: [],
     myPosition: null,
     myTeam: null,
-    dealerPosition: 0,
     manoPosition: 0,
-    isDealer: false,
     isMano: false,
-    scores: { A: 0, B: 0 },
+    scores: { AB: 0, CD: 0 },
     winScore: 40,
     musVotes: {},
-    phaseResults: {},
     bettingState: {
-      phase: null,
-      currentBet: 0,
-      totalStake: 0,
-      bets: [],
       currentBettorIndex: 0,
+      bets: [],
+      baseStake: 0,
+      raiseCount: 0,
       hordago: false,
-      kantaCount: 0
+      eliminated: new Set()
     },
+    phaseResults: {},
+    pendingPrimes: {},
     waitingForMus: false,
+    needsDiscard: false,
     currentBettor: 0,
     isMyTurn: false,
     roundHistory: []
@@ -50,6 +53,8 @@ const MusGame = () => {
   const [phaseResult, setPhaseResult] = useState(null);
   const [gameEndModal, setGameEndModal] = useState(null);
 
+  // ==================== SOCKET.IO ====================
+  
   useEffect(() => {
     socket = io(SOCKET_URL, {
       transports: ['websocket', 'polling'],
@@ -91,6 +96,12 @@ const MusGame = () => {
 
     socket.on('MUS_ACCEPTED', (data) => {
       setGameState(prev => ({ ...prev, ...data.gameState }));
+      setSelectedCards([]);
+    });
+
+    socket.on('MUS_RESTARTED', (data) => {
+      setGameState(prev => ({ ...prev, ...data.gameState }));
+      setSelectedCards([]);
     });
 
     socket.on('BETTING_STARTED', (data) => {
@@ -117,6 +128,7 @@ const MusGame = () => {
     socket.on('NEW_ROUND_STARTED', (data) => {
       setGameState(prev => ({ ...prev, ...data.gameState }));
       setPhaseResult(null);
+      setSelectedCards([]);
     });
 
     socket.on('PLAYER_DISCONNECTED', (data) => {
@@ -133,9 +145,11 @@ const MusGame = () => {
     };
   }, []);
 
+  // ==================== ACTIONS ====================
+
   const showError = (message) => {
     setError(message);
-    setTimeout(() => setError(null), 3000);
+    setTimeout(() => setError(null), 4000);
   };
 
   const handleCreateRoom = () => {
@@ -157,12 +171,21 @@ const MusGame = () => {
     socket.emit('START_GAME');
   };
 
-  const handleVoteMus = (wantsMus) => {
-    socket.emit('MUS_VOTE', { wantsMus });
+  const handleMusVote = (vote) => {
+    socket.emit('MUS_VOTE', { vote });
   };
 
-  const handlePlaceBet = (betType, betValue = null) => {
-    socket.emit('PLACE_BET', { betType, betValue });
+  const handleMusDiscard = () => {
+    if (selectedCards.length < 1 || selectedCards.length > 4) {
+      showError('Sélectionnez entre 1 et 4 cartes');
+      return;
+    }
+    socket.emit('MUS_DISCARD', { cardIndices: selectedCards });
+    setSelectedCards([]);
+  };
+
+  const handlePlaceBet = (action, value = null) => {
+    socket.emit('PLACE_BET', { action, value });
   };
 
   const handleStartNewRound = () => {
@@ -178,18 +201,17 @@ const MusGame = () => {
       state: 'WAITING',
       currentPhase: null,
       players: [],
-      teams: { A: [], B: [] },
+      teams: { AB: [], CD: [] },
       myCards: [],
       myPosition: null,
-      dealerPosition: 0,
       manoPosition: 0,
-      isDealer: false,
       isMano: false,
-      scores: { A: 0, B: 0 },
+      scores: { AB: 0, CD: 0 },
       musVotes: {},
-      phaseResults: {},
-      waitingForMus: false
+      waitingForMus: false,
+      needsDiscard: false
     });
+    setSelectedCards([]);
   };
 
   const handleCopyRoomId = () => {
@@ -198,12 +220,29 @@ const MusGame = () => {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const Card = ({ suit, value, highlighted = false }) => {
+  const toggleCardSelection = (index) => {
+    if (selectedCards.includes(index)) {
+      setSelectedCards(selectedCards.filter(i => i !== index));
+    } else {
+      if (selectedCards.length < 4) {
+        setSelectedCards([...selectedCards, index]);
+      }
+    }
+  };
+
+  // ==================== COMPONENTS ====================
+
+  const Card = ({ suit, value, highlighted = false, selectable = false, selected = false, onClick }) => {
     const isRed = suit === '♥' || suit === '♦';
     return (
-      <div className={`bg-white rounded-lg shadow-xl p-4 w-20 h-28 flex flex-col items-center justify-between border-2 transition-all ${
-        highlighted ? 'ring-4 ring-yellow-400 scale-110' : ''
-      } ${isRed ? 'border-red-600' : 'border-gray-800'} hover:scale-105`}>
+      <div 
+        className={`bg-white rounded-lg shadow-xl p-4 w-20 h-28 flex flex-col items-center justify-between border-2 transition-all ${
+          highlighted ? 'ring-4 ring-yellow-400 scale-110' : ''
+        } ${selected ? 'ring-4 ring-blue-400 scale-105 bg-blue-50' : ''} ${
+          isRed ? 'border-red-600' : 'border-gray-800'
+        } ${selectable ? 'hover:scale-105 cursor-pointer' : ''}`}
+        onClick={onClick}
+      >
         <div className={`text-2xl font-bold ${isRed ? 'text-red-600' : 'text-gray-800'}`}>
           {value}
         </div>
@@ -218,7 +257,7 @@ const MusGame = () => {
   };
 
   const PlayerSlot = ({ player, position, isMe, team }) => {
-    const positions = ['bottom', 'left', 'top', 'right'];
+    const positions = ['bottom', 'right', 'top', 'left']; // A, C, B, D
     const positionClass = positions[position];
     
     const getPositionStyles = () => {
@@ -231,21 +270,20 @@ const MusGame = () => {
       }
     };
 
-    const teamColor = team === 'A' ? 'bg-blue-600' : 'bg-red-600';
+    const teamColor = team === 'AB' ? 'bg-blue-600' : 'bg-red-600';
     const isBetting = gameState.currentBettor === position && gameState.state.includes('BETTING');
+    const isMano = gameState.manoPosition === position;
 
     return (
       <div className={`absolute ${getPositionStyles()} flex flex-col items-center gap-2 z-10`}>
         <div className={`${teamColor} text-white px-4 py-2 rounded-lg shadow-lg transition-all ${
           isMe ? 'ring-4 ring-yellow-400' : ''
         } ${isBetting ? 'animate-pulse ring-4 ring-green-400' : ''}`}>
-          <div className="font-bold">{player?.name || 'En attente...'}</div>
+          <div className="font-bold flex items-center gap-2">
+            {player?.name || 'En attente...'}
+            {isMano && <span className="text-xs bg-yellow-400 text-yellow-900 px-1 rounded">MANO</span>}
+          </div>
           <div className="text-xs">Équipe {team}</div>
-          {player?.stats && (
-            <div className="text-xs mt-1 opacity-75">
-              {player.stats.pointsScored}pts
-            </div>
-          )}
         </div>
         {isBetting && (
           <div className="bg-green-500 text-white text-xs px-2 py-1 rounded animate-bounce">
@@ -259,28 +297,72 @@ const MusGame = () => {
   const ScoreBoard = () => (
     <div className="flex gap-4 justify-center items-center">
       <div className={`px-6 py-3 rounded-lg shadow-lg transition-all ${
-        gameState.scores.A > gameState.scores.B ? 'bg-blue-600 scale-110' : 'bg-blue-500'
+        gameState.scores.AB > gameState.scores.CD ? 'bg-blue-600 scale-110' : 'bg-blue-500'
       }`}>
-        <div className="text-white text-xs font-medium">Équipe A</div>
-        <div className="text-white text-3xl font-bold">{gameState.scores.A}</div>
+        <div className="text-white text-xs font-medium">Équipe A+B</div>
+        <div className="text-white text-3xl font-bold">{gameState.scores.AB}</div>
         <div className="text-white text-xs opacity-75">/ {gameState.winScore}</div>
       </div>
       <div className="text-2xl text-white font-bold">VS</div>
       <div className={`px-6 py-3 rounded-lg shadow-lg transition-all ${
-        gameState.scores.B > gameState.scores.A ? 'bg-red-600 scale-110' : 'bg-red-500'
+        gameState.scores.CD > gameState.scores.AB ? 'bg-red-600 scale-110' : 'bg-red-500'
       }`}>
-        <div className="text-white text-xs font-medium">Équipe B</div>
-        <div className="text-white text-3xl font-bold">{gameState.scores.B}</div>
+        <div className="text-white text-xs font-medium">Équipe C+D</div>
+        <div className="text-white text-3xl font-bold">{gameState.scores.CD}</div>
         <div className="text-white text-xs opacity-75">/ {gameState.winScore}</div>
       </div>
     </div>
   );
+
+  const MusVotePanel = () => {
+    if (!gameState.waitingForMus) return null;
+
+    return (
+      <div className="fixed bottom-40 left-1/2 -translate-x-1/2 flex gap-4 z-20">
+        <button 
+          onClick={() => handleMusVote('JOSTA')} 
+          className="bg-red-600 text-white px-8 py-4 rounded-lg font-bold text-lg hover:bg-red-700 shadow-2xl"
+        >
+          JOSTA (Jouer)
+        </button>
+        <button 
+          onClick={() => handleMusVote('MUS')} 
+          className="bg-green-600 text-white px-8 py-4 rounded-lg font-bold text-lg hover:bg-green-700 shadow-2xl"
+        >
+          MUS (Changer)
+        </button>
+      </div>
+    );
+  };
+
+  const MusDiscardPanel = () => {
+    if (!gameState.needsDiscard) return null;
+
+    return (
+      <div className="fixed bottom-40 left-1/2 -translate-x-1/2 z-20 bg-white/95 backdrop-blur rounded-xl p-6 shadow-2xl">
+        <div className="text-center mb-4">
+          <div className="text-lg font-bold text-green-800">Jetez vos cartes (1-4)</div>
+          <div className="text-sm text-gray-600">Cliquez sur les cartes à jeter</div>
+          <div className="text-xs text-gray-500 mt-1">{selectedCards.length} carte(s) sélectionnée(s)</div>
+        </div>
+        <button
+          onClick={handleMusDiscard}
+          disabled={selectedCards.length < 1 || selectedCards.length > 4}
+          className="w-full bg-green-600 text-white py-3 rounded-lg font-bold hover:bg-green-700 disabled:bg-gray-300"
+        >
+          Jeter et piocher
+        </button>
+      </div>
+    );
+  };
 
   const BettingPanel = () => {
     if (!gameState.state.includes('BETTING')) return null;
     
     const bs = gameState.bettingState;
     const canBet = gameState.isMyTurn;
+    const hasImido = bs.bets.some(b => b.action === 'IMIDO' || b.action === 'GEHIAGO');
+    const hasHordago = bs.bets.some(b => b.action === 'HORDAGO');
 
     return (
       <div className="fixed bottom-40 left-1/2 -translate-x-1/2 z-20 bg-white/95 backdrop-blur rounded-xl p-6 shadow-2xl min-w-[400px]">
@@ -289,14 +371,14 @@ const MusGame = () => {
           <div className="text-2xl font-bold text-green-800">{gameState.currentPhase}</div>
         </div>
 
-        {bs.currentBet > 0 && (
+        {bs.raiseCount > 0 && (
           <div className="mb-4 p-3 bg-orange-100 rounded-lg text-center">
-            <div className="text-xs text-orange-700">Mise actuelle</div>
-            <div className="text-xl font-bold text-orange-900">{bs.currentBet} points</div>
+            <div className="text-xs text-orange-700">Relances</div>
+            <div className="text-xl font-bold text-orange-900">{bs.raiseCount}</div>
           </div>
         )}
 
-        {bs.hordago && (
+        {hasHordago && (
           <div className="mb-4 p-3 bg-red-100 rounded-lg text-center">
             <div className="text-lg font-bold text-red-900">🔥 HORDAGO ! 🔥</div>
           </div>
@@ -308,7 +390,8 @@ const MusGame = () => {
               C'est votre tour !
             </div>
             
-            {bs.bets.length === 0 ? (
+            {!hasImido && !hasHordago ? (
+              // Personne n'a encore misé
               <>
                 <button
                   onClick={() => handlePlaceBet('PASO')}
@@ -316,17 +399,12 @@ const MusGame = () => {
                 >
                   PASO (Passer)
                 </button>
-                <div className="grid grid-cols-5 gap-2">
-                  {[1, 2, 3, 4, 5].map(val => (
-                    <button
-                      key={val}
-                      onClick={() => handlePlaceBet('BET', val)}
-                      className="bg-blue-600 text-white py-2 rounded-lg font-bold hover:bg-blue-700"
-                    >
-                      {val}
-                    </button>
-                  ))}
-                </div>
+                <button
+                  onClick={() => handlePlaceBet('IMIDO')}
+                  className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700"
+                >
+                  IMIDO (Miser)
+                </button>
                 <button
                   onClick={() => handlePlaceBet('HORDAGO')}
                   className="w-full bg-red-600 text-white py-3 rounded-lg font-bold hover:bg-red-700"
@@ -334,36 +412,54 @@ const MusGame = () => {
                   🔥 HORDAGO
                 </button>
               </>
-            ) : (
+            ) : hasHordago ? (
+              // Répondre à HORDAGO
               <>
                 <button
-                  onClick={() => handlePlaceBet('PASO')}
+                  onClick={() => handlePlaceBet('TIRA')}
                   className="w-full bg-gray-500 text-white py-3 rounded-lg font-bold hover:bg-gray-600"
                 >
-                  PASO (Abandonner)
+                  TIRA (Abandonner)
                 </button>
                 <button
-                  onClick={() => handlePlaceBet('IMIDO')}
+                  onClick={() => handlePlaceBet('KANTA')}
+                  className="w-full bg-red-600 text-white py-3 rounded-lg font-bold hover:bg-red-700"
+                >
+                  KANTA (Accepter HORDAGO)
+                </button>
+              </>
+            ) : (
+              // Répondre à une mise normale
+              <>
+                <button
+                  onClick={() => handlePlaceBet('TIRA')}
+                  className="w-full bg-gray-500 text-white py-3 rounded-lg font-bold hover:bg-gray-600"
+                >
+                  TIRA (Abandonner)
+                </button>
+                <button
+                  onClick={() => handlePlaceBet('IDUKI')}
                   className="w-full bg-green-600 text-white py-3 rounded-lg font-bold hover:bg-green-700"
                 >
-                  IMIDO (Accepter {bs.currentBet}pts)
+                  IDUKI (Accepter)
                 </button>
-                {bs.kantaCount < 3 && (
-                  <>
-                    <div className="text-xs text-center text-gray-600 mt-2">Relancer :</div>
-                    <div className="grid grid-cols-5 gap-2">
-                      {[bs.currentBet + 1, bs.currentBet + 2, bs.currentBet + 3].filter(v => v <= 5).map(val => (
-                        <button
-                          key={val}
-                          onClick={() => handlePlaceBet('KANTA', val)}
-                          className="bg-orange-600 text-white py-2 rounded-lg font-bold hover:bg-orange-700"
-                        >
-                          {val}
-                        </button>
-                      ))}
-                    </div>
-                  </>
-                )}
+                <div className="text-xs text-center text-gray-600 mt-2">Relancer :</div>
+                <div className="flex gap-2 items-center">
+                  <input
+                    type="number"
+                    min="1"
+                    max="10"
+                    value={gehiagoAmount}
+                    onChange={(e) => setGehiagoAmount(parseInt(e.target.value) || 1)}
+                    className="w-20 px-2 py-2 border-2 border-gray-300 rounded-lg text-center"
+                  />
+                  <button
+                    onClick={() => handlePlaceBet('GEHIAGO', gehiagoAmount)}
+                    className="flex-1 bg-orange-600 text-white py-2 rounded-lg font-bold hover:bg-orange-700"
+                  >
+                    {gehiagoAmount} GEHIAGO
+                  </button>
+                </div>
                 <button
                   onClick={() => handlePlaceBet('HORDAGO')}
                   className="w-full bg-red-600 text-white py-3 rounded-lg font-bold hover:bg-red-700"
@@ -375,7 +471,9 @@ const MusGame = () => {
           </div>
         ) : (
           <div className="text-center text-gray-600 py-4">
-            <div className="animate-pulse">En attente du joueur {gameState.players[gameState.currentBettor]?.name}...</div>
+            <div className="animate-pulse">
+              En attente de {gameState.players[gameState.currentBettor]?.name}...
+            </div>
           </div>
         )}
       </div>
@@ -404,14 +502,15 @@ const MusGame = () => {
             
             <ScoreBoard />
 
-            <div className="mt-6 grid grid-cols-2 gap-4">
+            <div className="mt-6 space-y-2">
               {Object.entries(gameState.phaseResults || {}).map(([phase, result]) => (
-                <div key={phase} className="bg-gray-100 rounded-lg p-4">
+                <div key={phase} className="bg-gray-100 rounded-lg p-3 flex justify-between items-center">
                   <div className="text-sm font-semibold text-gray-600">{phase}</div>
-                  <div className={`text-xl font-bold ${
-                    result.winner === 'A' ? 'text-blue-600' : 'text-red-600'
+                  <div className={`text-lg font-bold ${
+                    result.winner === 'AB' ? 'text-blue-600' : 'text-red-600'
                   }`}>
-                    Équipe {result.winner} +{result.points}pts
+                    Équipe {result.winner}: +{result.points}pts
+                    {result.prime && ` (+${result.prime} prime)`}
                   </div>
                 </div>
               ))}
@@ -436,8 +535,8 @@ const MusGame = () => {
     if (!gameEndModal) return null;
 
     const winnerTeam = gameEndModal.winner;
-    const winnerColor = winnerTeam === 'A' ? 'text-blue-600' : 'text-red-600';
-    const winnerBg = winnerTeam === 'A' ? 'bg-blue-600' : 'bg-red-600';
+    const winnerColor = winnerTeam === 'AB' ? 'text-blue-600' : 'text-red-600';
+    const winnerBg = winnerTeam === 'AB' ? 'bg-blue-600' : 'bg-red-600';
 
     return (
       <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
@@ -453,30 +552,13 @@ const MusGame = () => {
               <div className="text-lg font-semibold mb-2">Score final</div>
               <div className="flex gap-8 justify-center">
                 <div>
-                  <div className="text-sm text-gray-600">Équipe A</div>
-                  <div className="text-3xl font-bold text-blue-600">{gameEndModal.finalScores.A}</div>
+                  <div className="text-sm text-gray-600">Équipe AB</div>
+                  <div className="text-3xl font-bold text-blue-600">{gameEndModal.finalScores.AB}</div>
                 </div>
                 <div>
-                  <div className="text-sm text-gray-600">Équipe B</div>
-                  <div className="text-3xl font-bold text-red-600">{gameEndModal.finalScores.B}</div>
+                  <div className="text-sm text-gray-600">Équipe CD</div>
+                  <div className="text-3xl font-bold text-red-600">{gameEndModal.finalScores.CD}</div>
                 </div>
-              </div>
-            </div>
-
-            <div className="mb-6">
-              <div className="text-lg font-semibold mb-3">Statistiques des joueurs</div>
-              <div className="grid grid-cols-2 gap-4">
-                {gameEndModal.stats.map((playerStat, idx) => (
-                  <div key={idx} className="bg-gray-50 rounded-lg p-3">
-                    <div className="font-bold">{playerStat.name}</div>
-                    <div className="text-sm text-gray-600 mt-1">
-                      {playerStat.stats.pointsScored} points marqués
-                    </div>
-                    <div className="text-sm text-gray-600">
-                      {playerStat.stats.betsWon} paris gagnés
-                    </div>
-                  </div>
-                ))}
               </div>
             </div>
 
@@ -503,14 +585,16 @@ const MusGame = () => {
     );
   };
 
+  // ==================== SCREENS ====================
+
   if (screen === 'HOME') {
     return (
       <div className="min-h-screen bg-gradient-to-br from-green-800 to-green-600 flex items-center justify-center p-4">
         <ErrorNotification />
         <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full">
           <h1 className="text-4xl font-bold text-center text-green-800 mb-2">🎴 MUS BASQUE</h1>
-          <p className="text-center text-gray-600 mb-2">Sprints 3, 4, 5</p>
-          <p className="text-center text-sm text-gray-500 mb-8">Système de mises complet</p>
+          <p className="text-center text-gray-600 mb-2">Règles authentiques</p>
+          <p className="text-center text-sm text-gray-500 mb-8">Cartes espagnoles - v3.0</p>
           
           <div className="mb-6">
             <label className="block text-sm font-medium text-gray-700 mb-2">Votre pseudo</label>
@@ -630,7 +714,7 @@ const MusGame = () => {
 
             <div className="grid grid-cols-2 gap-4">
               <div className="bg-blue-50 rounded-lg p-4 border-2 border-blue-200">
-                <div className="text-center font-bold text-blue-800 mb-3">⚔️ Équipe A</div>
+                <div className="text-center font-bold text-blue-800 mb-3">⚔️ Équipe A+B</div>
                 <div className="space-y-2">
                   {[0, 2].map(pos => {
                     const player = gameState.players.find(p => p.position === pos);
@@ -649,7 +733,7 @@ const MusGame = () => {
               </div>
 
               <div className="bg-red-50 rounded-lg p-4 border-2 border-red-200">
-                <div className="text-center font-bold text-red-800 mb-3">🛡️ Équipe B</div>
+                <div className="text-center font-bold text-red-800 mb-3">🛡️ Équipe C+D</div>
                 <div className="space-y-2">
                   {[1, 3].map(pos => {
                     const player = gameState.players.find(p => p.position === pos);
@@ -696,7 +780,7 @@ const MusGame = () => {
           <div className="relative w-[800px] h-[600px] bg-green-800 rounded-full shadow-2xl border-8 border-yellow-900">
             
             {gameState.players.map((player, idx) => {
-              const team = idx % 2 === 0 ? 'A' : 'B';
+              const team = (idx === 0 || idx === 2) ? 'AB' : 'CD';
               return <PlayerSlot key={player.id} player={player} position={idx} isMe={idx === gameState.myPosition} team={team} />;
             })}
 
@@ -716,22 +800,20 @@ const MusGame = () => {
         {gameState.myCards.length > 0 && (
           <div className="fixed bottom-8 left-1/2 -translate-x-1/2 flex gap-4 z-20">
             {gameState.myCards.map((card, idx) => (
-              <Card key={idx} suit={card.suit} value={card.name} />
+              <Card 
+                key={idx} 
+                suit={card.suit} 
+                value={card.name}
+                selectable={gameState.needsDiscard}
+                selected={selectedCards.includes(idx)}
+                onClick={() => gameState.needsDiscard && toggleCardSelection(idx)}
+              />
             ))}
           </div>
         )}
 
-        {gameState.waitingForMus && (
-          <div className="fixed bottom-40 left-1/2 -translate-x-1/2 flex gap-4 z-20">
-            <button onClick={() => handleVoteMus(false)} className="bg-red-600 text-white px-8 py-4 rounded-lg font-bold text-lg hover:bg-red-700 shadow-2xl">
-              IDOKI
-            </button>
-            <button onClick={() => handleVoteMus(true)} className="bg-green-600 text-white px-8 py-4 rounded-lg font-bold text-lg hover:bg-green-700 shadow-2xl">
-              MUS
-            </button>
-          </div>
-        )}
-
+        <MusVotePanel />
+        <MusDiscardPanel />
         <BettingPanel />
 
         <button onClick={handleLeaveRoom} className="fixed top-4 right-4 bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 flex items-center gap-2 z-30">
