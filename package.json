@@ -1,15 +1,15 @@
 {
   "name": "mus-basque-v2",
   "version": "2.0.0",
-  "description": "Jeu de Mus Basque en ligne - Version complète",
+  "description": "Jeu de Mus Basque en ligne",
   "scripts": {
-    "install-all": "cd backend && npm install && cd ../frontend && npm install",
+    "postinstall": "cd backend && npm install && cd ../frontend && npm install",
     "build": "cd frontend && npm run build",
-    "start": "cd backend && npm start",
-    "deploy": "npm run install-all && npm run build"
+    "start": "cd backend && npm start"
   },
   "engines": {
     "node": "18.x",
     "npm": "9.x"
-  }
+  },
+  "dependencies": {}
 }
