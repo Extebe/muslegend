@@ -1,8 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Users, PlayCircle, LogOut, Copy, Check, Wifi, WifiOff, AlertCircle, ChevronRight, Trophy } from 'lucide-react';
+import { Users, PlayCircle, LogOut, Copy, Check, Wifi, WifiOff, AlertCircle, ChevronRight, Trophy, Award } from 'lucide-react';
 import io from 'socket.io-client';
 
-// Configuration Socket.io
 const SOCKET_URL = window.location.origin;
 let socket = null;
 
@@ -14,6 +13,7 @@ const MusGame = () => {
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [winScore, setWinScore] = useState(40);
   
   const [gameState, setGameState] = useState({
     roomId: null,
@@ -23,20 +23,33 @@ const MusGame = () => {
     teams: { A: [], B: [] },
     myCards: [],
     myPosition: null,
+    myTeam: null,
     dealerPosition: 0,
     manoPosition: 0,
     isDealer: false,
     isMano: false,
     scores: { A: 0, B: 0 },
+    winScore: 40,
     musVotes: {},
     phaseResults: {},
-    waitingForMus: false
+    bettingState: {
+      phase: null,
+      currentBet: 0,
+      totalStake: 0,
+      bets: [],
+      currentBettorIndex: 0,
+      hordago: false,
+      kantaCount: 0
+    },
+    waitingForMus: false,
+    currentBettor: 0,
+    isMyTurn: false,
+    roundHistory: []
   });
 
   const [phaseResult, setPhaseResult] = useState(null);
+  const [gameEndModal, setGameEndModal] = useState(null);
 
-  // ==================== SOCKET.IO CONNECTION ====================
-  
   useEffect(() => {
     socket = io(SOCKET_URL, {
       transports: ['websocket', 'polling'],
@@ -80,14 +93,30 @@ const MusGame = () => {
       setGameState(prev => ({ ...prev, ...data.gameState }));
     });
 
-    socket.on('PHASE_STARTED', (data) => {
+    socket.on('BETTING_STARTED', (data) => {
       setGameState(prev => ({ ...prev, ...data.gameState }));
       setPhaseResult(null);
     });
 
-    socket.on('PHASE_RESULT', (data) => {
-      setPhaseResult(data);
+    socket.on('BET_UPDATE', (data) => {
       setGameState(prev => ({ ...prev, ...data.gameState }));
+      
+      if (data.betResult.action === 'ROUND_END' || data.betResult.action === 'GAME_END') {
+        setPhaseResult(data.betResult);
+      }
+    });
+
+    socket.on('ROUND_ENDED', (data) => {
+      setPhaseResult(data);
+    });
+
+    socket.on('GAME_ENDED', (data) => {
+      setGameEndModal(data);
+    });
+
+    socket.on('NEW_ROUND_STARTED', (data) => {
+      setGameState(prev => ({ ...prev, ...data.gameState }));
+      setPhaseResult(null);
     });
 
     socket.on('PLAYER_DISCONNECTED', (data) => {
@@ -104,8 +133,6 @@ const MusGame = () => {
     };
   }, []);
 
-  // ==================== ACTIONS ====================
-
   const showError = (message) => {
     setError(message);
     setTimeout(() => setError(null), 3000);
@@ -114,7 +141,10 @@ const MusGame = () => {
   const handleCreateRoom = () => {
     if (!playerName.trim()) return;
     setLoading(true);
-    socket.emit('CREATE_ROOM', { playerName });
+    socket.emit('CREATE_ROOM', { 
+      playerName,
+      config: { winScore }
+    });
   };
 
   const handleJoinRoom = () => {
@@ -131,8 +161,12 @@ const MusGame = () => {
     socket.emit('MUS_VOTE', { wantsMus });
   };
 
-  const handlePassPhase = () => {
-    socket.emit('PASS_PHASE');
+  const handlePlaceBet = (betType, betValue = null) => {
+    socket.emit('PLACE_BET', { betType, betValue });
+  };
+
+  const handleStartNewRound = () => {
+    socket.emit('START_NEW_ROUND');
     setPhaseResult(null);
   };
 
@@ -164,12 +198,12 @@ const MusGame = () => {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // ==================== COMPONENTS ====================
-
-  const Card = ({ suit, value }) => {
+  const Card = ({ suit, value, highlighted = false }) => {
     const isRed = suit === '♥' || suit === '♦';
     return (
-      <div className={`bg-white rounded-lg shadow-xl p-4 w-20 h-28 flex flex-col items-center justify-between border-2 transition-transform hover:scale-105 ${isRed ? 'border-red-600' : 'border-gray-800'}`}>
+      <div className={`bg-white rounded-lg shadow-xl p-4 w-20 h-28 flex flex-col items-center justify-between border-2 transition-all ${
+        highlighted ? 'ring-4 ring-yellow-400 scale-110' : ''
+      } ${isRed ? 'border-red-600' : 'border-gray-800'} hover:scale-105`}>
         <div className={`text-2xl font-bold ${isRed ? 'text-red-600' : 'text-gray-800'}`}>
           {value}
         </div>
@@ -198,13 +232,152 @@ const MusGame = () => {
     };
 
     const teamColor = team === 'A' ? 'bg-blue-600' : 'bg-red-600';
+    const isBetting = gameState.currentBettor === position && gameState.state.includes('BETTING');
 
     return (
       <div className={`absolute ${getPositionStyles()} flex flex-col items-center gap-2 z-10`}>
-        <div className={`${teamColor} text-white px-4 py-2 rounded-lg shadow-lg ${isMe ? 'ring-4 ring-yellow-400' : ''}`}>
+        <div className={`${teamColor} text-white px-4 py-2 rounded-lg shadow-lg transition-all ${
+          isMe ? 'ring-4 ring-yellow-400' : ''
+        } ${isBetting ? 'animate-pulse ring-4 ring-green-400' : ''}`}>
           <div className="font-bold">{player?.name || 'En attente...'}</div>
           <div className="text-xs">Équipe {team}</div>
+          {player?.stats && (
+            <div className="text-xs mt-1 opacity-75">
+              {player.stats.pointsScored}pts
+            </div>
+          )}
         </div>
+        {isBetting && (
+          <div className="bg-green-500 text-white text-xs px-2 py-1 rounded animate-bounce">
+            À lui de miser
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const ScoreBoard = () => (
+    <div className="flex gap-4 justify-center items-center">
+      <div className={`px-6 py-3 rounded-lg shadow-lg transition-all ${
+        gameState.scores.A > gameState.scores.B ? 'bg-blue-600 scale-110' : 'bg-blue-500'
+      }`}>
+        <div className="text-white text-xs font-medium">Équipe A</div>
+        <div className="text-white text-3xl font-bold">{gameState.scores.A}</div>
+        <div className="text-white text-xs opacity-75">/ {gameState.winScore}</div>
+      </div>
+      <div className="text-2xl text-white font-bold">VS</div>
+      <div className={`px-6 py-3 rounded-lg shadow-lg transition-all ${
+        gameState.scores.B > gameState.scores.A ? 'bg-red-600 scale-110' : 'bg-red-500'
+      }`}>
+        <div className="text-white text-xs font-medium">Équipe B</div>
+        <div className="text-white text-3xl font-bold">{gameState.scores.B}</div>
+        <div className="text-white text-xs opacity-75">/ {gameState.winScore}</div>
+      </div>
+    </div>
+  );
+
+  const BettingPanel = () => {
+    if (!gameState.state.includes('BETTING')) return null;
+    
+    const bs = gameState.bettingState;
+    const canBet = gameState.isMyTurn;
+
+    return (
+      <div className="fixed bottom-40 left-1/2 -translate-x-1/2 z-20 bg-white/95 backdrop-blur rounded-xl p-6 shadow-2xl min-w-[400px]">
+        <div className="text-center mb-4">
+          <div className="text-sm text-gray-600">Phase</div>
+          <div className="text-2xl font-bold text-green-800">{gameState.currentPhase}</div>
+        </div>
+
+        {bs.currentBet > 0 && (
+          <div className="mb-4 p-3 bg-orange-100 rounded-lg text-center">
+            <div className="text-xs text-orange-700">Mise actuelle</div>
+            <div className="text-xl font-bold text-orange-900">{bs.currentBet} points</div>
+          </div>
+        )}
+
+        {bs.hordago && (
+          <div className="mb-4 p-3 bg-red-100 rounded-lg text-center">
+            <div className="text-lg font-bold text-red-900">🔥 HORDAGO ! 🔥</div>
+          </div>
+        )}
+
+        {canBet ? (
+          <div className="space-y-2">
+            <div className="text-sm font-semibold text-center mb-3 text-green-700">
+              C'est votre tour !
+            </div>
+            
+            {bs.bets.length === 0 ? (
+              <>
+                <button
+                  onClick={() => handlePlaceBet('PASO')}
+                  className="w-full bg-gray-500 text-white py-3 rounded-lg font-bold hover:bg-gray-600"
+                >
+                  PASO (Passer)
+                </button>
+                <div className="grid grid-cols-5 gap-2">
+                  {[1, 2, 3, 4, 5].map(val => (
+                    <button
+                      key={val}
+                      onClick={() => handlePlaceBet('BET', val)}
+                      className="bg-blue-600 text-white py-2 rounded-lg font-bold hover:bg-blue-700"
+                    >
+                      {val}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  onClick={() => handlePlaceBet('HORDAGO')}
+                  className="w-full bg-red-600 text-white py-3 rounded-lg font-bold hover:bg-red-700"
+                >
+                  🔥 HORDAGO
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={() => handlePlaceBet('PASO')}
+                  className="w-full bg-gray-500 text-white py-3 rounded-lg font-bold hover:bg-gray-600"
+                >
+                  PASO (Abandonner)
+                </button>
+                <button
+                  onClick={() => handlePlaceBet('IMIDO')}
+                  className="w-full bg-green-600 text-white py-3 rounded-lg font-bold hover:bg-green-700"
+                >
+                  IMIDO (Accepter {bs.currentBet}pts)
+                </button>
+                {bs.kantaCount < 3 && (
+                  <>
+                    <div className="text-xs text-center text-gray-600 mt-2">Relancer :</div>
+                    <div className="grid grid-cols-5 gap-2">
+                      {[bs.currentBet + 1, bs.currentBet + 2, bs.currentBet + 3].filter(v => v <= 5).map(val => (
+                        <button
+                          key={val}
+                          onClick={() => handlePlaceBet('KANTA', val)}
+                          className="bg-orange-600 text-white py-2 rounded-lg font-bold hover:bg-orange-700"
+                        >
+                          {val}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+                <button
+                  onClick={() => handlePlaceBet('HORDAGO')}
+                  className="w-full bg-red-600 text-white py-3 rounded-lg font-bold hover:bg-red-700"
+                >
+                  🔥 HORDAGO
+                </button>
+              </>
+            )}
+          </div>
+        ) : (
+          <div className="text-center text-gray-600 py-4">
+            <div className="animate-pulse">En attente du joueur {gameState.players[gameState.currentBettor]?.name}...</div>
+          </div>
+        )}
       </div>
     );
   };
@@ -219,53 +392,39 @@ const MusGame = () => {
     );
   };
 
-  const PhaseResultModal = () => {
-    if (!phaseResult) return null;
-
-    const winner = phaseResult.result?.winner;
-    const winnerTeam = winner === 'A' ? 'Équipe A' : 'Équipe B';
-    const winnerColor = winner === 'A' ? 'text-blue-600' : 'text-red-600';
+  const RoundResultModal = () => {
+    if (!phaseResult || phaseResult.action !== 'ROUND_END') return null;
 
     return (
       <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-        <div className="bg-white rounded-2xl p-8 max-w-lg w-full mx-4 shadow-2xl">
+        <div className="bg-white rounded-2xl p-8 max-w-2xl w-full mx-4 shadow-2xl">
           <div className="text-center">
-            <Trophy className={`mx-auto mb-4 ${winnerColor}`} size={64} />
-            <h2 className="text-3xl font-bold mb-4">Phase {phaseResult.phase}</h2>
-            <div className={`text-2xl font-bold mb-6 ${winnerColor}`}>
-              🏆 {winnerTeam} gagne !
-            </div>
+            <Trophy className="mx-auto mb-4 text-yellow-500" size={64} />
+            <h2 className="text-3xl font-bold mb-6">Manche terminée !</h2>
             
-            {phaseResult.result?.details && (
-              <div className="bg-gray-100 rounded-lg p-4 mb-6">
-                <div className="text-sm text-gray-600">Détails</div>
-                <pre className="text-xs mt-2">{JSON.stringify(phaseResult.result.details, null, 2)}</pre>
-              </div>
-            )}
+            <ScoreBoard />
 
-            <div className="flex gap-2 justify-center mb-4">
-              <div className="bg-blue-100 px-4 py-2 rounded-lg">
-                <div className="text-xs text-blue-600">Équipe A</div>
-                <div className="text-2xl font-bold text-blue-600">{gameState.scores.A}</div>
-              </div>
-              <div className="bg-red-100 px-4 py-2 rounded-lg">
-                <div className="text-xs text-red-600">Équipe B</div>
-                <div className="text-2xl font-bold text-red-600">{gameState.scores.B}</div>
-              </div>
+            <div className="mt-6 grid grid-cols-2 gap-4">
+              {Object.entries(gameState.phaseResults || {}).map(([phase, result]) => (
+                <div key={phase} className="bg-gray-100 rounded-lg p-4">
+                  <div className="text-sm font-semibold text-gray-600">{phase}</div>
+                  <div className={`text-xl font-bold ${
+                    result.winner === 'A' ? 'text-blue-600' : 'text-red-600'
+                  }`}>
+                    Équipe {result.winner} +{result.points}pts
+                  </div>
+                </div>
+              ))}
             </div>
 
-            {phaseResult.nextPhase !== 'FINISHED' ? (
+            {phaseResult.nextRound && (
               <button
-                onClick={handlePassPhase}
-                className="w-full bg-green-600 text-white py-3 rounded-lg font-bold hover:bg-green-700 flex items-center justify-center gap-2"
+                onClick={handleStartNewRound}
+                className="w-full mt-6 bg-green-600 text-white py-4 rounded-lg font-bold text-lg hover:bg-green-700 flex items-center justify-center gap-2"
               >
-                Phase suivante: {phaseResult.nextPhase}
+                Manche suivante
                 <ChevronRight size={20} />
               </button>
-            ) : (
-              <div className="text-lg font-semibold text-gray-600">
-                Manche terminée !
-              </div>
             )}
           </div>
         </div>
@@ -273,7 +432,76 @@ const MusGame = () => {
     );
   };
 
-  // ==================== SCREENS ====================
+  const GameEndModal = () => {
+    if (!gameEndModal) return null;
+
+    const winnerTeam = gameEndModal.winner;
+    const winnerColor = winnerTeam === 'A' ? 'text-blue-600' : 'text-red-600';
+    const winnerBg = winnerTeam === 'A' ? 'bg-blue-600' : 'bg-red-600';
+
+    return (
+      <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+        <div className="bg-white rounded-2xl p-8 max-w-3xl w-full mx-4 shadow-2xl">
+          <div className="text-center">
+            <Award className={`mx-auto mb-4 ${winnerColor}`} size={96} />
+            <h2 className="text-4xl font-bold mb-2">Partie terminée !</h2>
+            <div className={`text-3xl font-bold mb-6 ${winnerColor}`}>
+              🏆 Équipe {winnerTeam} gagne ! 🏆
+            </div>
+            
+            <div className="mb-6 p-4 bg-gray-100 rounded-lg">
+              <div className="text-lg font-semibold mb-2">Score final</div>
+              <div className="flex gap-8 justify-center">
+                <div>
+                  <div className="text-sm text-gray-600">Équipe A</div>
+                  <div className="text-3xl font-bold text-blue-600">{gameEndModal.finalScores.A}</div>
+                </div>
+                <div>
+                  <div className="text-sm text-gray-600">Équipe B</div>
+                  <div className="text-3xl font-bold text-red-600">{gameEndModal.finalScores.B}</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="mb-6">
+              <div className="text-lg font-semibold mb-3">Statistiques des joueurs</div>
+              <div className="grid grid-cols-2 gap-4">
+                {gameEndModal.stats.map((playerStat, idx) => (
+                  <div key={idx} className="bg-gray-50 rounded-lg p-3">
+                    <div className="font-bold">{playerStat.name}</div>
+                    <div className="text-sm text-gray-600 mt-1">
+                      {playerStat.stats.pointsScored} points marqués
+                    </div>
+                    <div className="text-sm text-gray-600">
+                      {playerStat.stats.betsWon} paris gagnés
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex gap-4">
+              <button
+                onClick={handleLeaveRoom}
+                className="flex-1 bg-gray-600 text-white py-3 rounded-lg font-bold hover:bg-gray-700"
+              >
+                Quitter
+              </button>
+              <button
+                onClick={() => {
+                  setGameEndModal(null);
+                  handleStartNewRound();
+                }}
+                className={`flex-1 ${winnerBg} text-white py-3 rounded-lg font-bold hover:opacity-90`}
+              >
+                Revanche
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  };
 
   if (screen === 'HOME') {
     return (
@@ -281,8 +509,8 @@ const MusGame = () => {
         <ErrorNotification />
         <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full">
           <h1 className="text-4xl font-bold text-center text-green-800 mb-2">🎴 MUS BASQUE</h1>
-          <p className="text-center text-gray-600 mb-2">Sprint 2 - Game Logic</p>
-          <p className="text-center text-sm text-gray-500 mb-8">Phases de jeu complètes</p>
+          <p className="text-center text-gray-600 mb-2">Sprints 3, 4, 5</p>
+          <p className="text-center text-sm text-gray-500 mb-8">Système de mises complet</p>
           
           <div className="mb-6">
             <label className="block text-sm font-medium text-gray-700 mb-2">Votre pseudo</label>
@@ -295,6 +523,28 @@ const MusGame = () => {
               className="w-full px-4 py-3 border-2 border-gray-300 rounded-lg focus:border-green-500 focus:outline-none"
               maxLength={20}
             />
+          </div>
+
+          <div className="mb-6">
+            <label className="block text-sm font-medium text-gray-700 mb-2">Score de victoire</label>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setWinScore(30)}
+                className={`flex-1 py-2 rounded-lg font-semibold ${
+                  winScore === 30 ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-700'
+                }`}
+              >
+                30 points
+              </button>
+              <button
+                onClick={() => setWinScore(40)}
+                className={`flex-1 py-2 rounded-lg font-semibold ${
+                  winScore === 40 ? 'bg-green-600 text-white' : 'bg-gray-200 text-gray-700'
+                }`}
+              >
+                40 points
+              </button>
+            </div>
           </div>
 
           <div className="space-y-3">
@@ -359,6 +609,7 @@ const MusGame = () => {
             <div>
               <div className="text-sm text-gray-600 font-medium">Code de la salle</div>
               <div className="text-3xl font-mono font-bold text-green-800">{gameState.roomId}</div>
+              <div className="text-sm text-gray-600 mt-1">Victoire à {gameState.winScore} points</div>
             </div>
             <button onClick={handleCopyRoomId} className="bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 flex items-center gap-2">
               {copied ? <Check size={18} /> : <Copy size={18} />}
@@ -435,14 +686,12 @@ const MusGame = () => {
   }
 
   if (screen === 'GAME') {
-    const myTeam = gameState.myPosition !== null ? (gameState.myPosition % 2 === 0 ? 'A' : 'B') : null;
-
     return (
       <div className="min-h-screen bg-gradient-to-br from-green-900 to-green-700 relative">
         <ErrorNotification />
-        <PhaseResultModal />
+        <RoundResultModal />
+        <GameEndModal />
 
-        {/* Table */}
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="relative w-[800px] h-[600px] bg-green-800 rounded-full shadow-2xl border-8 border-yellow-900">
             
@@ -451,30 +700,19 @@ const MusGame = () => {
               return <PlayerSlot key={player.id} player={player} position={idx} isMe={idx === gameState.myPosition} team={team} />;
             })}
 
-            {/* Centre */}
             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center z-10">
-              <div className="bg-yellow-900 text-yellow-100 px-6 py-3 rounded-lg shadow-lg">
+              <div className="bg-yellow-900 text-yellow-100 px-6 py-3 rounded-lg shadow-lg mb-4">
                 <div className="text-sm font-medium">Phase actuelle</div>
                 <div className="text-3xl font-bold mt-1">
                   {gameState.currentPhase || gameState.state}
                 </div>
               </div>
 
-              <div className="mt-4 flex gap-4 justify-center">
-                <div className="bg-blue-600 text-white px-4 py-2 rounded-lg shadow-lg">
-                  <div className="text-xs">Équipe A</div>
-                  <div className="text-2xl font-bold">{gameState.scores.A}</div>
-                </div>
-                <div className="bg-red-600 text-white px-4 py-2 rounded-lg shadow-lg">
-                  <div className="text-xs">Équipe B</div>
-                  <div className="text-2xl font-bold">{gameState.scores.B}</div>
-                </div>
-              </div>
+              <ScoreBoard />
             </div>
           </div>
         </div>
 
-        {/* Cartes */}
         {gameState.myCards.length > 0 && (
           <div className="fixed bottom-8 left-1/2 -translate-x-1/2 flex gap-4 z-20">
             {gameState.myCards.map((card, idx) => (
@@ -483,7 +721,6 @@ const MusGame = () => {
           </div>
         )}
 
-        {/* Boutons MUS */}
         {gameState.waitingForMus && (
           <div className="fixed bottom-40 left-1/2 -translate-x-1/2 flex gap-4 z-20">
             <button onClick={() => handleVoteMus(false)} className="bg-red-600 text-white px-8 py-4 rounded-lg font-bold text-lg hover:bg-red-700 shadow-2xl">
@@ -495,14 +732,7 @@ const MusGame = () => {
           </div>
         )}
 
-        {/* Bouton Passer Phase */}
-        {gameState.currentPhase && !phaseResult && !gameState.waitingForMus && (
-          <div className="fixed bottom-40 left-1/2 -translate-x-1/2 z-20">
-            <button onClick={handlePassPhase} className="bg-orange-600 text-white px-8 py-4 rounded-lg font-bold text-lg hover:bg-orange-700 shadow-2xl">
-              Passer la phase {gameState.currentPhase}
-            </button>
-          </div>
-        )}
+        <BettingPanel />
 
         <button onClick={handleLeaveRoom} className="fixed top-4 right-4 bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 flex items-center gap-2 z-30">
           <LogOut size={18} /> Quitter
@@ -514,7 +744,7 @@ const MusGame = () => {
             <span className="font-medium">{connected ? 'Connecté' : 'Déconnecté'}</span>
           </div>
           <div className="text-xs text-gray-600 mt-1">Salle: {gameState.roomId}</div>
-          <div className="text-xs text-gray-600">Équipe: {myTeam}</div>
+          <div className="text-xs text-gray-600">Équipe: {gameState.myTeam}</div>
         </div>
       </div>
     );
@@ -524,4 +754,3 @@ const MusGame = () => {
 };
 
 export default MusGame;
-

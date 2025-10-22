@@ -3,12 +3,49 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#000000" />
-    <meta name="description" content="Jeu de Mus Basque en ligne" />
-    <title>🎴 Mus Basque</title>
+    <meta name="theme-color" content="#166534" />
+    <meta name="description" content="Jeu de Mus Basque en ligne - Partie multijoueur en temps réel" />
+    <title>🎴 Mus Basque - Jeu de cartes en ligne</title>
+    
+    <!-- Open Graph -->
+    <meta property="og:title" content="Mus Basque - Jeu de cartes traditionnel" />
+    <meta property="og:description" content="Jouez au Mus en ligne avec vos amis. Système de mises complet, parties en temps réel." />
+    <meta property="og:type" content="website" />
+    
+    <style>
+        #root {
+            min-height: 100vh;
+        }
+        
+        /* Loading spinner initial */
+        .loading-spinner {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background: linear-gradient(135deg, #166534 0%, #15803d 100%);
+        }
+        
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
 </head>
 <body>
     <noscript>Vous devez activer JavaScript pour jouer au Mus.</noscript>
-    <div id="root"></div>
+    <div id="root">
+        <div class="loading-spinner">
+            <div class="spinner"></div>
+        </div>
+    </div>
 </body>
 </html>
