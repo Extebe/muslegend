@@ -15,7 +15,6 @@ const MusGame = () => {
   const [loading, setLoading] = useState(false);
   const [winScore, setWinScore] = useState(40);
   
-  // État pour MUS
   const [selectedCards, setSelectedCards] = useState([]);
   const [gehiagoAmount, setGehiagoAmount] = useState(2);
   
@@ -52,6 +51,49 @@ const MusGame = () => {
 
   const [phaseResult, setPhaseResult] = useState(null);
   const [gameEndModal, setGameEndModal] = useState(null);
+
+  // ==================== UTILITAIRES ====================
+
+  // Conversion symboles cartes espagnoles
+  const getSuitDisplay = (suit) => {
+    const suits = {
+      '♦': { symbol: '🟡', name: 'Oros', color: 'text-yellow-600' },
+      '♥': { symbol: '🍷', name: 'Copas', color: 'text-red-600' },
+      '♠': { symbol: '⚔️', name: 'Espadas', color: 'text-gray-800' },
+      '♣': { symbol: '🪵', name: 'Bastos', color: 'text-amber-800' }
+    };
+    return suits[suit] || { symbol: suit, name: suit, color: 'text-gray-800' };
+  };
+
+  // Traduction des états de jeu
+  const getStateDisplay = (state) => {
+    const states = {
+      'WAITING': 'En attente de joueurs',
+      'LOBBY': 'Salle d\'attente',
+      'MUS_DECISION': 'Vote MUS',
+      'MUS_DISCARD': 'Jetée de cartes',
+      'BETTING_GRAND': 'Mises - Grand',
+      'BETTING_PETIT': 'Mises - Petit',
+      'BETTING_PAIRES': 'Mises - Paires',
+      'BETTING_JEU': 'Mises - Jeu',
+      'BETTING_PUNTUAK': 'Mises - Puntuak',
+      'ROUND_ENDED': 'Fin de manche',
+      'GAME_ENDED': 'Partie terminée'
+    };
+    return states[state] || state;
+  };
+
+  // Traduction des phases
+  const getPhaseDisplay = (phase) => {
+    const phases = {
+      'GRAND': 'Grand',
+      'PETIT': 'Petit',
+      'PAIRES': 'Paires',
+      'JEU': 'Jeu',
+      'PUNTUAK': 'Puntuak'
+    };
+    return phases[phase] || phase;
+  };
 
   // ==================== SOCKET.IO ====================
   
@@ -233,31 +275,32 @@ const MusGame = () => {
   // ==================== COMPONENTS ====================
 
   const Card = ({ suit, value, highlighted = false, selectable = false, selected = false, onClick }) => {
-    const isRed = suit === '♥' || suit === '♦';
+    const suitDisplay = getSuitDisplay(suit);
+    
     return (
       <div 
-        className={`bg-white rounded-lg shadow-xl p-4 w-20 h-28 flex flex-col items-center justify-between border-2 transition-all ${
+        className={`bg-white rounded-xl shadow-2xl p-4 w-24 h-32 flex flex-col items-center justify-between border-4 transition-all ${
           highlighted ? 'ring-4 ring-yellow-400 scale-110' : ''
-        } ${selected ? 'ring-4 ring-blue-400 scale-105 bg-blue-50' : ''} ${
-          isRed ? 'border-red-600' : 'border-gray-800'
-        } ${selectable ? 'hover:scale-105 cursor-pointer' : ''}`}
+        } ${selected ? 'ring-4 ring-blue-500 scale-105 bg-blue-50' : ''} ${
+          suitDisplay.color === 'text-red-600' ? 'border-red-500' : 'border-amber-700'
+        } ${selectable ? 'hover:scale-110 cursor-pointer hover:shadow-xl' : ''}`}
         onClick={onClick}
       >
-        <div className={`text-2xl font-bold ${isRed ? 'text-red-600' : 'text-gray-800'}`}>
+        <div className={`text-2xl font-bold ${suitDisplay.color}`}>
           {value}
         </div>
-        <div className={`text-4xl ${isRed ? 'text-red-600' : 'text-gray-800'}`}>
-          {suit}
+        <div className="text-5xl">
+          {suitDisplay.symbol}
         </div>
-        <div className={`text-2xl font-bold ${isRed ? 'text-red-600' : 'text-gray-800'}`}>
-          {value}
+        <div className={`text-xs font-semibold ${suitDisplay.color} opacity-70`}>
+          {suitDisplay.name}
         </div>
       </div>
     );
   };
 
   const PlayerSlot = ({ player, position, isMe, team }) => {
-    const positions = ['bottom', 'right', 'top', 'left']; // A, C, B, D
+    const positions = ['bottom', 'right', 'top', 'left'];
     const positionClass = positions[position];
     
     const getPositionStyles = () => {
@@ -281,13 +324,13 @@ const MusGame = () => {
         } ${isBetting ? 'animate-pulse ring-4 ring-green-400' : ''}`}>
           <div className="font-bold flex items-center gap-2">
             {player?.name || 'En attente...'}
-            {isMano && <span className="text-xs bg-yellow-400 text-yellow-900 px-1 rounded">MANO</span>}
+            {isMano && <span className="text-xs bg-yellow-400 text-yellow-900 px-2 py-1 rounded font-bold">MANO</span>}
           </div>
           <div className="text-xs">Équipe {team}</div>
         </div>
         {isBetting && (
-          <div className="bg-green-500 text-white text-xs px-2 py-1 rounded animate-bounce">
-            À lui de miser
+          <div className="bg-green-500 text-white text-xs px-3 py-1 rounded-full animate-bounce font-bold shadow-lg">
+            🎲 À son tour
           </div>
         )}
       </div>
@@ -321,15 +364,17 @@ const MusGame = () => {
       <div className="fixed bottom-40 left-1/2 -translate-x-1/2 flex gap-4 z-20">
         <button 
           onClick={() => handleMusVote('JOSTA')} 
-          className="bg-red-600 text-white px-8 py-4 rounded-lg font-bold text-lg hover:bg-red-700 shadow-2xl"
+          className="bg-red-600 text-white px-10 py-5 rounded-xl font-bold text-xl hover:bg-red-700 shadow-2xl transform hover:scale-105 transition-all"
         >
-          JOSTA (Jouer)
+          🚫 JOSTA
+          <div className="text-xs font-normal mt-1">Commencer à jouer</div>
         </button>
         <button 
           onClick={() => handleMusVote('MUS')} 
-          className="bg-green-600 text-white px-8 py-4 rounded-lg font-bold text-lg hover:bg-green-700 shadow-2xl"
+          className="bg-green-600 text-white px-10 py-5 rounded-xl font-bold text-xl hover:bg-green-700 shadow-2xl transform hover:scale-105 transition-all"
         >
-          MUS (Changer)
+          🔄 MUS
+          <div className="text-xs font-normal mt-1">Changer mes cartes</div>
         </button>
       </div>
     );
@@ -339,18 +384,20 @@ const MusGame = () => {
     if (!gameState.needsDiscard) return null;
 
     return (
-      <div className="fixed bottom-40 left-1/2 -translate-x-1/2 z-20 bg-white/95 backdrop-blur rounded-xl p-6 shadow-2xl">
+      <div className="fixed bottom-40 left-1/2 -translate-x-1/2 z-20 bg-white/95 backdrop-blur rounded-xl p-6 shadow-2xl border-4 border-green-500">
         <div className="text-center mb-4">
-          <div className="text-lg font-bold text-green-800">Jetez vos cartes (1-4)</div>
-          <div className="text-sm text-gray-600">Cliquez sur les cartes à jeter</div>
-          <div className="text-xs text-gray-500 mt-1">{selectedCards.length} carte(s) sélectionnée(s)</div>
+          <div className="text-xl font-bold text-green-800 mb-1">🎴 Jetée de cartes</div>
+          <div className="text-sm text-gray-600">Sélectionnez 1 à 4 cartes à échanger</div>
+          <div className="text-lg font-bold text-green-700 mt-2">
+            {selectedCards.length} carte{selectedCards.length > 1 ? 's' : ''} sélectionnée{selectedCards.length > 1 ? 's' : ''}
+          </div>
         </div>
         <button
           onClick={handleMusDiscard}
           disabled={selectedCards.length < 1 || selectedCards.length > 4}
-          className="w-full bg-green-600 text-white py-3 rounded-lg font-bold hover:bg-green-700 disabled:bg-gray-300"
+          className="w-full bg-green-600 text-white py-3 rounded-lg font-bold hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-all text-lg"
         >
-          Jeter et piocher
+          ✅ Jeter et piocher
         </button>
       </div>
     );
@@ -365,29 +412,33 @@ const MusGame = () => {
     const hasHordago = bs.bets.some(b => b.action === 'HORDAGO');
 
     return (
-      <div className="fixed bottom-40 left-1/2 -translate-x-1/2 z-20 bg-white/95 backdrop-blur rounded-xl p-6 shadow-2xl min-w-[400px]">
+      <div className="fixed bottom-40 left-1/2 -translate-x-1/2 z-20 bg-white/95 backdrop-blur rounded-xl p-6 shadow-2xl min-w-[450px] border-4 border-amber-600">
         <div className="text-center mb-4">
-          <div className="text-sm text-gray-600">Phase</div>
-          <div className="text-2xl font-bold text-green-800">{gameState.currentPhase}</div>
+          <div className="text-sm text-gray-600 font-medium">Phase de mises</div>
+          <div className="text-3xl font-bold text-amber-800">{getPhaseDisplay(gameState.currentPhase)}</div>
         </div>
 
         {bs.raiseCount > 0 && (
-          <div className="mb-4 p-3 bg-orange-100 rounded-lg text-center">
-            <div className="text-xs text-orange-700">Relances</div>
-            <div className="text-xl font-bold text-orange-900">{bs.raiseCount}</div>
+          <div className="mb-4 p-3 bg-orange-100 rounded-lg text-center border-2 border-orange-300">
+            <div className="text-xs text-orange-700 font-semibold">Nombre de relances</div>
+            <div className="text-2xl font-bold text-orange-900">{bs.raiseCount}</div>
+            <div className="text-xs text-orange-600 mt-1">
+              Points en jeu : {bs.baseStake + bs.raiseCount}
+            </div>
           </div>
         )}
 
         {hasHordago && (
-          <div className="mb-4 p-3 bg-red-100 rounded-lg text-center">
-            <div className="text-lg font-bold text-red-900">🔥 HORDAGO ! 🔥</div>
+          <div className="mb-4 p-4 bg-red-100 rounded-lg text-center border-2 border-red-400 animate-pulse">
+            <div className="text-2xl font-bold text-red-900">🔥 HORDAGO ! 🔥</div>
+            <div className="text-xs text-red-700 mt-1">Mise totale - Victoire ou défaite</div>
           </div>
         )}
 
         {canBet ? (
           <div className="space-y-2">
-            <div className="text-sm font-semibold text-center mb-3 text-green-700">
-              C'est votre tour !
+            <div className="text-sm font-bold text-center mb-3 text-green-800 bg-green-100 py-2 rounded-lg">
+              🎯 C'est votre tour de miser !
             </div>
             
             {!hasImido && !hasHordago ? (
@@ -395,21 +446,21 @@ const MusGame = () => {
               <>
                 <button
                   onClick={() => handlePlaceBet('PASO')}
-                  className="w-full bg-gray-500 text-white py-3 rounded-lg font-bold hover:bg-gray-600"
+                  className="w-full bg-gray-500 text-white py-3 rounded-lg font-bold hover:bg-gray-600 transition-all"
                 >
-                  PASO (Passer)
+                  ⏭️ PASO (Passer)
                 </button>
                 <button
                   onClick={() => handlePlaceBet('IMIDO')}
-                  className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700"
+                  className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 transition-all"
                 >
-                  IMIDO (Miser)
+                  💰 IMIDO (Miser 2 points)
                 </button>
                 <button
                   onClick={() => handlePlaceBet('HORDAGO')}
-                  className="w-full bg-red-600 text-white py-3 rounded-lg font-bold hover:bg-red-700"
+                  className="w-full bg-red-600 text-white py-3 rounded-lg font-bold hover:bg-red-700 transition-all"
                 >
-                  🔥 HORDAGO
+                  🔥 HORDAGO (Tout miser!)
                 </button>
               </>
             ) : hasHordago ? (
@@ -417,15 +468,15 @@ const MusGame = () => {
               <>
                 <button
                   onClick={() => handlePlaceBet('TIRA')}
-                  className="w-full bg-gray-500 text-white py-3 rounded-lg font-bold hover:bg-gray-600"
+                  className="w-full bg-gray-500 text-white py-3 rounded-lg font-bold hover:bg-gray-600 transition-all"
                 >
-                  TIRA (Abandonner)
+                  🏳️ TIRA (Abandonner)
                 </button>
                 <button
                   onClick={() => handlePlaceBet('KANTA')}
-                  className="w-full bg-red-600 text-white py-3 rounded-lg font-bold hover:bg-red-700"
+                  className="w-full bg-red-600 text-white py-4 rounded-lg font-bold hover:bg-red-700 transition-all text-lg"
                 >
-                  KANTA (Accepter HORDAGO)
+                  ⚔️ KANTA (Accepter le HORDAGO!)
                 </button>
               </>
             ) : (
@@ -433,17 +484,17 @@ const MusGame = () => {
               <>
                 <button
                   onClick={() => handlePlaceBet('TIRA')}
-                  className="w-full bg-gray-500 text-white py-3 rounded-lg font-bold hover:bg-gray-600"
+                  className="w-full bg-gray-500 text-white py-3 rounded-lg font-bold hover:bg-gray-600 transition-all"
                 >
-                  TIRA (Abandonner)
+                  🏳️ TIRA (Abandonner)
                 </button>
                 <button
                   onClick={() => handlePlaceBet('IDUKI')}
-                  className="w-full bg-green-600 text-white py-3 rounded-lg font-bold hover:bg-green-700"
+                  className="w-full bg-green-600 text-white py-3 rounded-lg font-bold hover:bg-green-700 transition-all"
                 >
-                  IDUKI (Accepter)
+                  ✅ IDUKI (Accepter et révéler)
                 </button>
-                <div className="text-xs text-center text-gray-600 mt-2">Relancer :</div>
+                <div className="text-xs text-center text-gray-700 mt-2 font-semibold">Relancer la mise :</div>
                 <div className="flex gap-2 items-center">
                   <input
                     type="number"
@@ -451,28 +502,28 @@ const MusGame = () => {
                     max="10"
                     value={gehiagoAmount}
                     onChange={(e) => setGehiagoAmount(parseInt(e.target.value) || 1)}
-                    className="w-20 px-2 py-2 border-2 border-gray-300 rounded-lg text-center"
+                    className="w-20 px-2 py-2 border-2 border-gray-300 rounded-lg text-center font-bold text-lg"
                   />
                   <button
                     onClick={() => handlePlaceBet('GEHIAGO', gehiagoAmount)}
-                    className="flex-1 bg-orange-600 text-white py-2 rounded-lg font-bold hover:bg-orange-700"
+                    className="flex-1 bg-orange-600 text-white py-3 rounded-lg font-bold hover:bg-orange-700 transition-all"
                   >
-                    {gehiagoAmount} GEHIAGO
+                    ⬆️ {gehiagoAmount} GEHIAGO
                   </button>
                 </div>
                 <button
                   onClick={() => handlePlaceBet('HORDAGO')}
-                  className="w-full bg-red-600 text-white py-3 rounded-lg font-bold hover:bg-red-700"
+                  className="w-full bg-red-600 text-white py-3 rounded-lg font-bold hover:bg-red-700 transition-all"
                 >
-                  🔥 HORDAGO
+                  🔥 HORDAGO (Tout miser!)
                 </button>
               </>
             )}
           </div>
         ) : (
-          <div className="text-center text-gray-600 py-4">
-            <div className="animate-pulse">
-              En attente de {gameState.players[gameState.currentBettor]?.name}...
+          <div className="text-center text-gray-700 py-4 bg-gray-100 rounded-lg">
+            <div className="animate-pulse font-semibold">
+              ⏳ En attente de {gameState.players[gameState.currentBettor]?.name}...
             </div>
           </div>
         )}
@@ -498,19 +549,20 @@ const MusGame = () => {
         <div className="bg-white rounded-2xl p-8 max-w-2xl w-full mx-4 shadow-2xl">
           <div className="text-center">
             <Trophy className="mx-auto mb-4 text-yellow-500" size={64} />
-            <h2 className="text-3xl font-bold mb-6">Manche terminée !</h2>
+            <h2 className="text-3xl font-bold mb-6">🎊 Manche terminée !</h2>
             
             <ScoreBoard />
 
             <div className="mt-6 space-y-2">
+              <div className="text-lg font-bold text-gray-700 mb-3">Résultats de la manche :</div>
               {Object.entries(gameState.phaseResults || {}).map(([phase, result]) => (
-                <div key={phase} className="bg-gray-100 rounded-lg p-3 flex justify-between items-center">
-                  <div className="text-sm font-semibold text-gray-600">{phase}</div>
+                <div key={phase} className="bg-gray-100 rounded-lg p-3 flex justify-between items-center border-2 border-gray-300">
+                  <div className="text-sm font-bold text-gray-700">{getPhaseDisplay(phase)}</div>
                   <div className={`text-lg font-bold ${
                     result.winner === 'AB' ? 'text-blue-600' : 'text-red-600'
                   }`}>
                     Équipe {result.winner}: +{result.points}pts
-                    {result.prime && ` (+${result.prime} prime)`}
+                    {result.prime && ` (+${result.prime} 🏅)`}
                   </div>
                 </div>
               ))}
@@ -519,7 +571,7 @@ const MusGame = () => {
             {phaseResult.nextRound && (
               <button
                 onClick={handleStartNewRound}
-                className="w-full mt-6 bg-green-600 text-white py-4 rounded-lg font-bold text-lg hover:bg-green-700 flex items-center justify-center gap-2"
+                className="w-full mt-6 bg-green-600 text-white py-4 rounded-lg font-bold text-lg hover:bg-green-700 flex items-center justify-center gap-2 transition-all"
               >
                 Manche suivante
                 <ChevronRight size={20} />
@@ -543,9 +595,9 @@ const MusGame = () => {
         <div className="bg-white rounded-2xl p-8 max-w-3xl w-full mx-4 shadow-2xl">
           <div className="text-center">
             <Award className={`mx-auto mb-4 ${winnerColor}`} size={96} />
-            <h2 className="text-4xl font-bold mb-2">Partie terminée !</h2>
+            <h2 className="text-4xl font-bold mb-2">🎉 Partie terminée ! 🎉</h2>
             <div className={`text-3xl font-bold mb-6 ${winnerColor}`}>
-              🏆 Équipe {winnerTeam} gagne ! 🏆
+              🏆 L'équipe {winnerTeam} remporte la victoire ! 🏆
             </div>
             
             <div className="mb-6 p-4 bg-gray-100 rounded-lg">
@@ -565,7 +617,7 @@ const MusGame = () => {
             <div className="flex gap-4">
               <button
                 onClick={handleLeaveRoom}
-                className="flex-1 bg-gray-600 text-white py-3 rounded-lg font-bold hover:bg-gray-700"
+                className="flex-1 bg-gray-600 text-white py-3 rounded-lg font-bold hover:bg-gray-700 transition-all"
               >
                 Quitter
               </button>
@@ -574,9 +626,9 @@ const MusGame = () => {
                   setGameEndModal(null);
                   handleStartNewRound();
                 }}
-                className={`flex-1 ${winnerBg} text-white py-3 rounded-lg font-bold hover:opacity-90`}
+                className={`flex-1 ${winnerBg} text-white py-3 rounded-lg font-bold hover:opacity-90 transition-all`}
               >
-                Revanche
+                🔄 Revanche
               </button>
             </div>
           </div>
@@ -593,8 +645,8 @@ const MusGame = () => {
         <ErrorNotification />
         <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-md w-full">
           <h1 className="text-4xl font-bold text-center text-green-800 mb-2">🎴 MUS BASQUE</h1>
-          <p className="text-center text-gray-600 mb-2">Règles authentiques</p>
-          <p className="text-center text-sm text-gray-500 mb-8">Cartes espagnoles - v3.0</p>
+          <p className="text-center text-gray-600 mb-2">Jeu de cartes traditionnel</p>
+          <p className="text-center text-sm text-gray-500 mb-8">Cartes espagnoles • Règles authentiques • v3.1</p>
           
           <div className="mb-6">
             <label className="block text-sm font-medium text-gray-700 mb-2">Votre pseudo</label>
@@ -683,7 +735,7 @@ const MusGame = () => {
         <ErrorNotification />
         <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-2xl w-full">
           <div className="flex items-center justify-between mb-6">
-            <h2 className="text-3xl font-bold text-green-800">Salle de jeu</h2>
+            <h2 className="text-3xl font-bold text-green-800">🎴 Salle de jeu</h2>
             <button onClick={handleLeaveRoom} className="text-red-600 hover:text-red-700 flex items-center gap-2">
               <LogOut size={20} /> Quitter
             </button>
@@ -787,9 +839,14 @@ const MusGame = () => {
             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center z-10">
               <div className="bg-yellow-900 text-yellow-100 px-6 py-3 rounded-lg shadow-lg mb-4">
                 <div className="text-sm font-medium">Phase actuelle</div>
-                <div className="text-3xl font-bold mt-1">
-                  {gameState.currentPhase || gameState.state}
+                <div className="text-2xl font-bold mt-1">
+                  {getStateDisplay(gameState.state)}
                 </div>
+                {gameState.currentPhase && (
+                  <div className="text-lg font-semibold mt-1 text-yellow-300">
+                    {getPhaseDisplay(gameState.currentPhase)}
+                  </div>
+                )}
               </div>
 
               <ScoreBoard />
