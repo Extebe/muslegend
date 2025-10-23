@@ -1,4 +1,4 @@
-// server.js - Mus Basque - Règles authentiques - BUGFIX v3.1
+// server.js - Mus Basque - Règles authentiques - v3.3
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -21,7 +21,7 @@ app.use(express.static(path.join(__dirname, '../frontend/build')));
 // ==================== CONFIGURATION ====================
 const GAME_CONFIG = {
   MAX_PLAYERS: 4,
-  RECONNECT_TIMEOUT: 60000,
+  RECONNECT_TIMEOUT: 30000, // Réduit à 30s
   DEFAULT_WIN_SCORE: 40
 };
 
@@ -38,7 +38,7 @@ class Room {
     this.manoPosition = 0;
     this.deck = [];
     this.playerCards = {};
-    this.playerDiscards = {}; // FIX: Initialisé correctement
+    this.playerDiscards = {};
     this.musVotes = {};
     this.scores = { AB: 0, CD: 0 };
     this.winScore = config.winScore || GAME_CONFIG.DEFAULT_WIN_SCORE;
@@ -61,6 +61,7 @@ class Room {
     
     this.roundHistory = [];
     this.gameStartTime = null;
+    this.gameEnded = false; // FIX: Nouveau flag
     
     this.addPlayer(creatorSocketId, creatorName);
   }
@@ -146,11 +147,11 @@ class Room {
   distributeCards() {
     this.createDeck();
     this.playerCards = {};
-    this.playerDiscards = {}; // FIX: Reset à chaque distribution
+    this.playerDiscards = {};
     
     this.players.forEach(player => {
       this.playerCards[player.id] = this.deck.splice(0, 4);
-      this.playerDiscards[player.id] = []; // FIX: Initialiser à tableau vide
+      this.playerDiscards[player.id] = [];
     });
   }
 
@@ -181,7 +182,6 @@ class Room {
     
     if (allVoted) {
       this.state = 'MUS_DISCARD';
-      // FIX: Reset les discards pour le nouveau tour de MUS
       this.players.forEach(player => {
         this.playerDiscards[player.id] = [];
       });
@@ -192,44 +192,28 @@ class Room {
   }
 
   handleMusDiscard(playerId, cardIndices) {
-    console.log(`[DEBUG] Discard demandé par joueur ${playerId}:`, cardIndices);
-    console.log(`[DEBUG] État actuel playerDiscards:`, this.playerDiscards);
-    
     if (cardIndices.length < 1 || cardIndices.length > 4) {
       return { success: false, error: 'Doit jeter entre 1 et 4 cartes' };
     }
 
-    // FIX: Vérifier que playerDiscards existe pour ce joueur
     if (!this.playerDiscards[playerId]) {
       this.playerDiscards[playerId] = [];
     }
 
-    // Jeter les cartes
     const cardsToDiscard = cardIndices.map(idx => this.playerCards[playerId][idx]);
     this.playerDiscards[playerId] = cardsToDiscard;
     
-    console.log(`[DEBUG] Cartes jetées:`, cardsToDiscard);
-    
-    // Retirer les cartes de la main
     this.playerCards[playerId] = this.playerCards[playerId].filter((_, idx) => !cardIndices.includes(idx));
     
-    // Piocher de nouvelles cartes
     const newCards = this.deck.splice(0, cardIndices.length);
     this.playerCards[playerId].push(...newCards);
 
-    console.log(`[DEBUG] Nouvelles cartes piochées:`, newCards);
-
-    // FIX: Vérifier correctement si tous ont jeté
     const allDiscarded = this.players.every(p => {
       const hasDiscarded = this.playerDiscards[p.id] && this.playerDiscards[p.id].length > 0;
-      console.log(`[DEBUG] Joueur ${p.id} (${p.name}) a jeté: ${hasDiscarded}`);
       return hasDiscarded;
     });
     
-    console.log(`[DEBUG] Tous ont jeté: ${allDiscarded}`);
-    
     if (allDiscarded) {
-      console.log(`[DEBUG] Recommencer le vote MUS`);
       this.startMusDecision();
       return { action: 'RESTART_MUS_VOTE', allDiscarded: true, success: true };
     }
@@ -244,6 +228,79 @@ class Room {
   // ==================== PHASES DE JEU ====================
   
   startBettingPhase(phase) {
+    console.log(`[${this.roomId}] Tentative de démarrage phase: ${phase}`);
+    
+    if (phase === 'PAIRES') {
+      const canPlayPaires = this.canPlayPairesPhase();
+      console.log(`[${this.roomId}] Peut jouer PAIRES: ${canPlayPaires.canPlay}`);
+      
+      if (!canPlayPaires.canPlay) {
+        if (canPlayPaires.onlyOneTeam) {
+          const phaseWinner = this.determinePhaseWinner('PAIRES');
+          
+          this.phaseResults['PAIRES'] = {
+            winner: phaseWinner.winner,
+            points: 0,
+            reason: 'ONLY_ONE_TEAM_HAS_PAIRES'
+          };
+          
+          this.phaseWinners['PAIRES'] = phaseWinner.winner;
+          
+          const prime = this.calculatePrime('PAIRES', phaseWinner.details);
+          if (prime > 0) {
+            this.pendingPrimes['PAIRES'] = {
+              team: phaseWinner.winner,
+              points: prime
+            };
+          }
+          
+          console.log(`[${this.roomId}] Une seule équipe a des paires, prime seulement`);
+        } else {
+          this.phaseResults['PAIRES'] = {
+            winner: null,
+            points: 0,
+            reason: 'NO_PAIRES'
+          };
+          
+          console.log(`[${this.roomId}] Personne n'a de paires, skip phase`);
+        }
+        
+        return this.moveToNextPhase();
+      }
+    }
+    
+    if (phase === 'JEU') {
+      const canPlayJeu = this.canPlayJeuPhase();
+      console.log(`[${this.roomId}] Peut jouer JEU: ${canPlayJeu.canPlay}`);
+      
+      if (!canPlayJeu.canPlay) {
+        console.log(`[${this.roomId}] Personne n'a le JEU → PUNTUAK`);
+        this.phases[this.currentPhaseIndex] = 'PUNTUAK';
+        phase = 'PUNTUAK';
+      } else if (canPlayJeu.onlyOneTeam) {
+        const phaseWinner = this.determinePhaseWinner('JEU');
+        
+        this.phaseResults['JEU'] = {
+          winner: phaseWinner.winner,
+          points: 0,
+          reason: 'ONLY_ONE_TEAM_HAS_JEU'
+        };
+        
+        this.phaseWinners['JEU'] = phaseWinner.winner;
+        
+        const prime = this.calculatePrime('JEU', phaseWinner.details);
+        if (prime > 0) {
+          this.pendingPrimes['JEU'] = {
+            team: phaseWinner.winner,
+            points: prime
+          };
+        }
+        
+        console.log(`[${this.roomId}] Une seule équipe a le jeu, prime seulement`);
+        return this.moveToNextPhase();
+      }
+    }
+    
     this.state = `BETTING_${phase}`;
     this.currentPhase = phase;
     this.bettingState = {
@@ -255,6 +312,32 @@ class Room {
       eliminated: new Set(),
       allPaso: true
     };
+  }
+
+  canPlayPairesPhase() {
+    const teamABestPaires = this.detectBestPaires(this.getTeamCards('AB'));
+    const teamBBestPaires = this.detectBestPaires(this.getTeamCards('CD'));
+    
+    const teamAHasPaires = teamABestPaires.value > 0;
+    const teamBHasPaires = teamBBestPaires.value > 0;
+    
+    const canPlay = teamAHasPaires && teamBHasPaires;
+    const onlyOneTeam = (teamAHasPaires && !teamBHasPaires) || (!teamAHasPaires && teamBHasPaires);
+    
+    return { canPlay, onlyOneTeam, teamAHasPaires, teamBHasPaires };
+  }
+
+  canPlayJeuPhase() {
+    const teamAJeu = this.calculateJeu(this.getTeamCards('AB'));
+    const teamBJeu = this.calculateJeu(this.getTeamCards('CD'));
+    
+    const teamAHasJeu = teamAJeu.hasJeu;
+    const teamBHasJeu = teamBJeu.hasJeu;
+    
+    const canPlay = teamAHasJeu && teamBHasJeu;
+    const onlyOneTeam = (teamAHasJeu && !teamBHasJeu) || (!teamAHasJeu && teamBHasJeu);
+    
+    return { canPlay, onlyOneTeam, teamAHasJeu, teamBHasJeu };
   }
 
   handleBet(playerId, action, value = null) {
@@ -502,17 +585,6 @@ class Room {
   moveToNextPhase() {
     this.currentPhaseIndex++;
     
-    if (this.currentPhaseIndex === this.phases.indexOf('JEU') + 1) {
-      const teamAJeu = this.calculateJeu(this.getTeamCards('AB'));
-      const teamBJeu = this.calculateJeu(this.getTeamCards('CD'));
-      
-      if (!teamAJeu.hasJeu && !teamBJeu.hasJeu) {
-        this.phases[this.currentPhaseIndex] = 'PUNTUAK';
-        this.startBettingPhase('PUNTUAK');
-        return { nextPhase: 'PUNTUAK' };
-      }
-    }
-    
     if (this.currentPhaseIndex >= this.phases.length) {
       return this.endRound();
     }
@@ -704,14 +776,16 @@ class Room {
     };
   }
 
-  endGame(winner) {
+  endGame(winner, reason = 'WIN') {
     const duration = Date.now() - this.gameStartTime;
     
     this.state = 'GAME_ENDED';
+    this.gameEnded = true; // FIX: Marquer la partie comme terminée
     
     return {
       action: 'GAME_END',
       winner,
+      reason, // FIX: Ajout de la raison (WIN ou PLAYER_LEFT)
       finalScores: this.scores,
       duration,
       stats: this.players.map(p => ({
@@ -987,16 +1061,17 @@ io.on('connection', (socket) => {
   });
 
   socket.on('LEAVE_ROOM', () => {
-    handlePlayerDisconnect(socket);
+    handlePlayerDisconnect(socket, true); // FIX: true = déconnexion volontaire
   });
 
   socket.on('disconnect', () => {
     console.log(`Client déconnecté: ${socket.id}`);
-    handlePlayerDisconnect(socket);
+    handlePlayerDisconnect(socket, false); // FIX: false = déconnexion réseau
   });
 });
 
-function handlePlayerDisconnect(socket) {
+// FIX: handlePlayerDisconnect modifié
+function handlePlayerDisconnect(socket, isVoluntary = false) {
   const playerData = playerSockets.get(socket.id);
   if (!playerData) return;
 
@@ -1004,7 +1079,29 @@ function handlePlayerDisconnect(socket) {
   if (!room) return;
 
   const player = room.players.find(p => p.id === playerData.playerId);
-  if (player) {
+  if (!player) return;
+
+  const wasInGame = room.state !== 'WAITING' && room.state !== 'LOBBY';
+
+  // FIX: Si c'est volontaire OU si la partie a déjà commencé → fin immédiate
+  if (isVoluntary || wasInGame) {
+    console.log(`[${room.roomId}] ${player.name} a quitté → Fin de partie immédiate`);
+    
+    // Notifier tout le monde
+    io.to(playerData.roomId).emit('PLAYER_LEFT', {
+      playerId: playerData.playerId,
+      playerName: player.name,
+      gameEnded: true
+    });
+
+    // Supprimer la salle après 5 secondes
+    setTimeout(() => {
+      rooms.delete(playerData.roomId);
+      console.log(`[${playerData.roomId}] Salle supprimée`);
+    }, 5000);
+
+  } else {
+    // Sinon (en lobby), marquer comme déconnecté avec timeout
     player.connected = false;
     
     io.to(playerData.roomId).emit('PLAYER_DISCONNECTED', {
@@ -1018,7 +1115,7 @@ function handlePlayerDisconnect(socket) {
         
         if (room.players.length < 4) {
           io.to(playerData.roomId).emit('GAME_CANCELLED', {
-            message: 'Partie annulée'
+            message: 'Partie annulée - joueur manquant'
           });
           
           if (room.players.length === 0) {
@@ -1068,7 +1165,7 @@ const PORT = process.env.PORT || 3001;
 
 server.listen(PORT, () => {
   console.log('='.repeat(50));
-  console.log(`🎴 Serveur MUS BASQUE Authentique - v3.1 BUGFIX`);
+  console.log(`🎴 Serveur MUS BASQUE Authentique - v3.3`);
   console.log(`🌐 Port: ${PORT}`);
   console.log(`⏰ ${new Date().toISOString()}`);
   console.log('='.repeat(50));
