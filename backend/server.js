@@ -1,4 +1,4 @@
-// server.js - Mus Basque - Règles authentiques
+// server.js - Mus Basque - Règles authentiques - BUGFIX v3.1
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -33,33 +33,31 @@ class Room {
   constructor(roomId, creatorSocketId, creatorName, config = {}) {
     this.roomId = roomId;
     this.players = [];
-    this.state = 'WAITING'; // WAITING, LOBBY, MUS_DECISION, BETTING_GRAND, etc.
+    this.state = 'WAITING';
     this.teams = { A: [], B: [] };
-    this.manoPosition = 0; // Qui commence (A=0, C=1, B=2, D=3)
+    this.manoPosition = 0;
     this.deck = [];
     this.playerCards = {};
-    this.playerDiscards = {}; // Cartes jetées pendant MUS
-    this.musVotes = {}; // playerId => 'MUS' | 'JOSTA'
-    this.scores = { AB: 0, CD: 0 }; // Équipe A+B vs C+D
+    this.playerDiscards = {}; // FIX: Initialisé correctement
+    this.musVotes = {};
+    this.scores = { AB: 0, CD: 0 };
     this.winScore = config.winScore || GAME_CONFIG.DEFAULT_WIN_SCORE;
     
-    // État des mises
-    this.currentPhase = null; // 'GRAND', 'PETIT', 'PAIRES', 'JEU', 'PUNTUAK'
+    this.currentPhase = null;
     this.phases = ['GRAND', 'PETIT', 'PAIRES', 'JEU'];
     this.currentPhaseIndex = 0;
     this.bettingState = {
-      currentBettorIndex: 0, // Index du joueur qui doit parier (0=A, 1=C, 2=B, 3=D)
-      bets: [], // { playerId, action: 'PASO'|'IMIDO'|'GEHIAGO'|'IDUKI'|'TIRA'|'HORDAGO'|'KANTA', value }
-      baseStake: 0, // Mise de base (IMIDO = 1)
-      raiseCount: 0, // Nombre de relances
+      currentBettorIndex: 0,
+      bets: [],
+      baseStake: 0,
+      raiseCount: 0,
       hordago: false,
-      eliminated: new Set() // Joueurs qui ont fait TIRA
+      eliminated: new Set()
     };
     
-    // Résultats de la manche
-    this.phaseResults = {}; // phase => { winner: 'AB'|'CD', points, details }
-    this.phaseWinners = {}; // phase => 'AB'|'CD'
-    this.pendingPrimes = {}; // phase => { team: 'AB'|'CD', points }
+    this.phaseResults = {};
+    this.phaseWinners = {};
+    this.pendingPrimes = {};
     
     this.roundHistory = [];
     this.gameStartTime = null;
@@ -76,7 +74,7 @@ class Room {
       id: this.players.length,
       socketId,
       name,
-      position: this.players.length, // 0=A, 1=C, 2=B, 3=D
+      position: this.players.length,
       connected: true,
       stats: {
         roundsWon: 0,
@@ -111,15 +109,14 @@ class Room {
   }
 
   assignTeams() {
-    // A(0) et B(2) vs C(1) et D(3)
-    this.teams.A = [this.players[0], this.players[2]]; // Équipe AB
-    this.teams.B = [this.players[1], this.players[3]]; // Équipe CD
+    this.teams.A = [this.players[0], this.players[2]];
+    this.teams.B = [this.players[1], this.players[3]];
   }
 
   // ==================== CARTES ESPAGNOLES ====================
   
   createDeck() {
-    const suits = ['♦', '♥', '♠', '♣']; // Oros, Copas, Espadas, Bastos
+    const suits = ['♦', '♥', '♠', '♣'];
     const values = [
       { name: 'As', grandValue: 1, petitValue: 1, gameValue: 1 },
       { name: '2', grandValue: 2, petitValue: 2, gameValue: 2 },
@@ -128,9 +125,9 @@ class Room {
       { name: '5', grandValue: 5, petitValue: 5, gameValue: 5 },
       { name: '6', grandValue: 6, petitValue: 6, gameValue: 6 },
       { name: '7', grandValue: 7, petitValue: 7, gameValue: 7 },
-      { name: 'V', grandValue: 8, petitValue: 8, gameValue: 10 }, // Valet (Sota)
-      { name: 'C', grandValue: 9, petitValue: 9, gameValue: 10 }, // Cavalier (Caballo)
-      { name: 'R', grandValue: 10, petitValue: 10, gameValue: 10 } // Roi (Rey)
+      { name: 'V', grandValue: 8, petitValue: 8, gameValue: 10 },
+      { name: 'C', grandValue: 9, petitValue: 9, gameValue: 10 },
+      { name: 'R', grandValue: 10, petitValue: 10, gameValue: 10 }
     ];
 
     this.deck = [];
@@ -140,7 +137,6 @@ class Room {
       }
     }
     
-    // Mélanger
     for (let i = this.deck.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [this.deck[i], this.deck[j]] = [this.deck[j], this.deck[i]];
@@ -150,11 +146,11 @@ class Room {
   distributeCards() {
     this.createDeck();
     this.playerCards = {};
-    this.playerDiscards = {};
+    this.playerDiscards = {}; // FIX: Reset à chaque distribution
     
     this.players.forEach(player => {
       this.playerCards[player.id] = this.deck.splice(0, 4);
-      this.playerDiscards[player.id] = [];
+      this.playerDiscards[player.id] = []; // FIX: Initialiser à tableau vide
     });
   }
 
@@ -166,10 +162,8 @@ class Room {
   }
 
   handleMusVote(playerId, vote) {
-    // vote = 'MUS' ou 'JOSTA'
     this.musVotes[playerId] = vote;
     
-    // Ordre de vote : A (mano) → C → B → D
     const voteOrder = [
       this.manoPosition,
       (this.manoPosition + 1) % 4,
@@ -177,19 +171,20 @@ class Room {
       (this.manoPosition + 3) % 4
     ];
     
-    // Vérifier si tous ont voté ou si quelqu'un a fait JOSTA
     const allVoted = voteOrder.every(pos => this.musVotes[pos] !== undefined);
     const someJosta = Object.values(this.musVotes).some(v => v === 'JOSTA');
     
     if (someJosta) {
-      // Quelqu'un refuse le MUS → commencer les phases
       this.startBettingPhase('GRAND');
       return { action: 'START_BETTING', phase: 'GRAND' };
     }
     
     if (allVoted) {
-      // Tous veulent MUS → passer à la jetée de cartes
       this.state = 'MUS_DISCARD';
+      // FIX: Reset les discards pour le nouveau tour de MUS
+      this.players.forEach(player => {
+        this.playerDiscards[player.id] = [];
+      });
       return { action: 'MUS_ACCEPTED', needDiscard: true };
     }
     
@@ -197,14 +192,23 @@ class Room {
   }
 
   handleMusDiscard(playerId, cardIndices) {
-    // cardIndices = [0, 1, 2, 3] (indices des cartes à jeter, entre 0 et 3)
+    console.log(`[DEBUG] Discard demandé par joueur ${playerId}:`, cardIndices);
+    console.log(`[DEBUG] État actuel playerDiscards:`, this.playerDiscards);
+    
     if (cardIndices.length < 1 || cardIndices.length > 4) {
       return { success: false, error: 'Doit jeter entre 1 et 4 cartes' };
+    }
+
+    // FIX: Vérifier que playerDiscards existe pour ce joueur
+    if (!this.playerDiscards[playerId]) {
+      this.playerDiscards[playerId] = [];
     }
 
     // Jeter les cartes
     const cardsToDiscard = cardIndices.map(idx => this.playerCards[playerId][idx]);
     this.playerDiscards[playerId] = cardsToDiscard;
+    
+    console.log(`[DEBUG] Cartes jetées:`, cardsToDiscard);
     
     // Retirer les cartes de la main
     this.playerCards[playerId] = this.playerCards[playerId].filter((_, idx) => !cardIndices.includes(idx));
@@ -213,16 +217,28 @@ class Room {
     const newCards = this.deck.splice(0, cardIndices.length);
     this.playerCards[playerId].push(...newCards);
 
-    // Vérifier si tous ont jeté
-    const allDiscarded = this.players.every(p => this.playerDiscards[p.id].length > 0);
+    console.log(`[DEBUG] Nouvelles cartes piochées:`, newCards);
+
+    // FIX: Vérifier correctement si tous ont jeté
+    const allDiscarded = this.players.every(p => {
+      const hasDiscarded = this.playerDiscards[p.id] && this.playerDiscards[p.id].length > 0;
+      console.log(`[DEBUG] Joueur ${p.id} (${p.name}) a jeté: ${hasDiscarded}`);
+      return hasDiscarded;
+    });
+    
+    console.log(`[DEBUG] Tous ont jeté: ${allDiscarded}`);
     
     if (allDiscarded) {
-      // Recommencer le vote MUS
+      console.log(`[DEBUG] Recommencer le vote MUS`);
       this.startMusDecision();
-      return { action: 'RESTART_MUS_VOTE', allDiscarded: true };
+      return { action: 'RESTART_MUS_VOTE', allDiscarded: true, success: true };
     }
     
-    return { action: 'WAITING_DISCARD', discardedCount: Object.keys(this.playerDiscards).filter(k => this.playerDiscards[k].length > 0).length };
+    return { 
+      action: 'WAITING_DISCARD', 
+      discardedCount: this.players.filter(p => this.playerDiscards[p.id]?.length > 0).length,
+      success: true 
+    };
   }
 
   // ==================== PHASES DE JEU ====================
@@ -231,25 +247,23 @@ class Room {
     this.state = `BETTING_${phase}`;
     this.currentPhase = phase;
     this.bettingState = {
-      currentBettorIndex: this.manoPosition, // A commence
+      currentBettorIndex: this.manoPosition,
       bets: [],
       baseStake: 0,
       raiseCount: 0,
       hordago: false,
       eliminated: new Set(),
-      allPaso: true // Pour détecter si tout le monde fait PASO
+      allPaso: true
     };
   }
 
   handleBet(playerId, action, value = null) {
     const bs = this.bettingState;
     
-    // Vérifier que c'est le tour du joueur
     if (this.players[bs.currentBettorIndex].id !== playerId) {
       return { success: false, error: 'Pas votre tour' };
     }
 
-    // Vérifier que le joueur n'est pas éliminé
     if (bs.eliminated.has(playerId)) {
       return { success: false, error: 'Vous avez fait TIRA' };
     }
@@ -295,17 +309,14 @@ class Room {
   handlePaso(playerId) {
     const bs = this.bettingState;
     
-    // PASO n'est possible que si personne n'a encore misé
     if (bs.bets.length > 0 && bs.bets.some(b => b.action !== 'PASO')) {
       return { error: 'Impossible de faire PASO après une mise' };
     }
 
     bs.bets.push({ playerId, action: 'PASO' });
     
-    // Passer au joueur suivant
     this.nextBettor();
     
-    // Vérifier si tous ont fait PASO
     if (bs.bets.length === 4 && bs.bets.every(b => b.action === 'PASO')) {
       return this.resolveAllPaso();
     }
@@ -318,9 +329,8 @@ class Room {
     bs.allPaso = false;
     
     bs.bets.push({ playerId, action: 'IMIDO' });
-    bs.baseStake = 1; // Mise de base = 1
+    bs.baseStake = 1;
     
-    // Passer au joueur suivant (adversaire)
     this.nextBettor();
     
     return { action: 'IMIDO_PLACED', baseStake: 1, waitingFor: bs.currentBettorIndex };
@@ -337,10 +347,8 @@ class Room {
     bs.bets.push({ playerId, action: 'GEHIAGO', value: raiseAmount });
     bs.raiseCount++;
     
-    // Réinitialiser les joueurs éliminés (nouvelle relance = nouveau tour)
     bs.eliminated.clear();
     
-    // Passer au joueur suivant
     this.nextBettor();
     
     return { action: 'RAISED', raiseCount: bs.raiseCount, waitingFor: bs.currentBettorIndex };
@@ -351,7 +359,6 @@ class Room {
     
     bs.bets.push({ playerId, action: 'IDUKI' });
     
-    // IDUKI = on révèle et on résout la phase
     return this.resolvePhase();
   }
 
@@ -361,19 +368,15 @@ class Room {
     bs.bets.push({ playerId, action: 'TIRA' });
     bs.eliminated.add(playerId);
     
-    // Calculer les points : baseStake (1) + raiseCount
     const points = bs.baseStake + bs.raiseCount;
     
-    // Déterminer l'équipe gagnante (celle qui n'a pas fait TIRA)
     const playerTeam = this.getPlayerTeam(playerId);
     const winnerTeam = playerTeam === 'AB' ? 'CD' : 'AB';
     
-    // Vérifier si toute l'équipe a fait TIRA
     const teamPlayers = this.getTeamPlayers(playerTeam);
     const allTeamTira = teamPlayers.every(p => bs.eliminated.has(p.id));
     
     if (allTeamTira) {
-      // Toute l'équipe a abandonné → donner les points et passer à la phase suivante
       this.phaseResults[this.currentPhase] = {
         winner: winnerTeam,
         points,
@@ -385,7 +388,6 @@ class Room {
       return this.moveToNextPhase();
     }
     
-    // Passer au joueur suivant
     this.nextBettor();
     
     return { action: 'TIRA_MADE', eliminated: playerId, points, waitingFor: bs.currentBettorIndex };
@@ -398,7 +400,6 @@ class Room {
     bs.bets.push({ playerId, action: 'HORDAGO' });
     bs.hordago = true;
     
-    // Passer à l'adversaire qui doit répondre
     this.nextBettor();
     
     return { action: 'HORDAGO_PLACED', waitingFor: bs.currentBettorIndex };
@@ -409,13 +410,11 @@ class Room {
     
     bs.bets.push({ playerId, action: 'KANTA' });
     
-    // KANTA = accepter HORDAGO et révéler
-    // Le gagnant de cette phase remporte la partie (40 pts)
     const phaseWinner = this.determinePhaseWinner(this.currentPhase);
     
     this.phaseResults[this.currentPhase] = {
       winner: phaseWinner.winner,
-      points: this.winScore, // Victoire directe
+      points: this.winScore,
       reason: 'HORDAGO'
     };
     
@@ -427,18 +426,15 @@ class Room {
   nextBettor() {
     const bs = this.bettingState;
     
-    // Ordre : A(0) → C(1) → B(2) → D(3)
     do {
       bs.currentBettorIndex = (bs.currentBettorIndex + 1) % 4;
     } while (bs.eliminated.has(bs.currentBettorIndex));
   }
 
   resolveAllPaso() {
-    // Tout le monde a fait PASO
     const phase = this.currentPhase;
     
     if (phase === 'GRAND' || phase === 'PETIT') {
-      // Grand/Petit : 1 pt au gagnant (IDUKI virtuel)
       const phaseWinner = this.determinePhaseWinner(phase);
       
       this.phaseResults[phase] = {
@@ -450,7 +446,6 @@ class Room {
       this.scores[phaseWinner.winner] += 1;
       
     } else {
-      // Paires/Jeu/PUNTUAK : 0 pt mais prime en fin de manche
       const phaseWinner = this.determinePhaseWinner(phase);
       
       this.phaseResults[phase] = {
@@ -461,7 +456,6 @@ class Room {
       
       this.phaseWinners[phase] = phaseWinner.winner;
       
-      // Calculer la prime pour plus tard
       const prime = this.calculatePrime(phase, phaseWinner.details);
       if (prime > 0) {
         this.pendingPrimes[phase] = {
@@ -475,13 +469,11 @@ class Room {
   }
 
   resolvePhase() {
-    // IDUKI = révéler et comparer
     const phase = this.currentPhase;
     const bs = this.bettingState;
     
     const phaseWinner = this.determinePhaseWinner(phase);
     
-    // Calculer les points : baseStake (1) + raiseCount
     const points = bs.baseStake + bs.raiseCount;
     
     this.phaseResults[phase] = {
@@ -494,7 +486,6 @@ class Room {
     this.scores[phaseWinner.winner] += points;
     this.phaseWinners[phase] = phaseWinner.winner;
     
-    // Calculer la prime si applicable
     if (phase === 'PAIRES' || phase === 'JEU' || phase === 'PUNTUAK') {
       const prime = this.calculatePrime(phase, phaseWinner.details);
       if (prime > 0) {
@@ -511,14 +502,11 @@ class Room {
   moveToNextPhase() {
     this.currentPhaseIndex++;
     
-    // Vérifier si on doit passer à PUNTUAK
     if (this.currentPhaseIndex === this.phases.indexOf('JEU') + 1) {
-      // Vérifier si quelqu'un a le JEU
       const teamAJeu = this.calculateJeu(this.getTeamCards('AB'));
       const teamBJeu = this.calculateJeu(this.getTeamCards('CD'));
       
       if (!teamAJeu.hasJeu && !teamBJeu.hasJeu) {
-        // Personne n'a le JEU → PUNTUAK
         this.phases[this.currentPhaseIndex] = 'PUNTUAK';
         this.startBettingPhase('PUNTUAK');
         return { nextPhase: 'PUNTUAK' };
@@ -573,7 +561,6 @@ class Room {
         if (jeuA.hasJeu && !jeuB.hasJeu) result = 1;
         else if (!jeuA.hasJeu && jeuB.hasJeu) result = -1;
         else if (jeuA.hasJeu && jeuB.hasJeu) {
-          // Comparer les totaux selon l'ordre : 31 > 32 > 40 > 39 > 38... > 33
           result = this.compareJeu(jeuA.total, jeuB.total);
         }
         details = { teamAB: jeuA, teamCD: jeuB };
@@ -587,7 +574,6 @@ class Room {
         break;
     }
 
-    // En cas d'égalité : la Mano gagne
     if (result === 0) {
       const manoTeam = this.manoPosition % 2 === 0 ? 'AB' : 'CD';
       result = manoTeam === 'AB' ? 1 : -1;
@@ -600,16 +586,12 @@ class Room {
   }
 
   detectBestPaires(cards) {
-    // Cartes par joueur (4 par joueur, 8 total pour l'équipe)
-    // On cherche les paires dans chaque main de 4 cartes
-    
     const player1Cards = cards.slice(0, 4);
     const player2Cards = cards.slice(4, 8);
     
     const paires1 = this.detectPaires(player1Cards);
     const paires2 = this.detectPaires(player2Cards);
     
-    // Retourner la meilleure
     return paires1.value > paires2.value ? paires1 : paires2;
   }
 
@@ -622,17 +604,14 @@ class Room {
 
     const counts = Object.values(valueCounts).sort((a, b) => b - a);
     
-    // Double paire (2+2) ou 4 identiques (compté comme double paire)
     if (counts[0] === 4 || (counts[0] === 2 && counts[1] === 2)) {
       return { type: 'DOUBLE_PAIRE', value: 3, name: 'Double paire' };
     }
     
-    // Brelan (3 identiques)
     if (counts[0] === 3) {
       return { type: 'BRELAN', value: 2, name: 'Brelan' };
     }
     
-    // Paire simple
     if (counts[0] === 2) {
       return { type: 'PAIRE', value: 1, name: 'Paire' };
     }
@@ -641,7 +620,6 @@ class Room {
   }
 
   calculateJeu(cards) {
-    // Cartes par joueur
     const player1Cards = cards.slice(0, 4);
     const player2Cards = cards.slice(4, 8);
     
@@ -657,7 +635,6 @@ class Room {
   }
 
   compareJeu(a, b) {
-    // Ordre : 31 > 32 > 40 > 39 > 38 > 37 > 36 > 35 > 34 > 33
     const order = [31, 32, 40, 39, 38, 37, 36, 35, 34, 33];
     const indexA = order.indexOf(a);
     const indexB = order.indexOf(b);
@@ -670,10 +647,9 @@ class Room {
   }
 
   calculatePrime(phase, details) {
-    // Primes uniquement pour Paires, Jeu, PUNTUAK
     if (phase === 'PAIRES') {
       const bestPaires = details.teamAB.value > details.teamCD.value ? details.teamAB : details.teamCD;
-      return bestPaires.value; // 1, 2 ou 3
+      return bestPaires.value;
     }
     
     if (phase === 'JEU') {
@@ -691,7 +667,6 @@ class Room {
   // ==================== FIN DE MANCHE & PARTIE ====================
   
   endRound() {
-    // Ajouter les primes
     Object.entries(this.pendingPrimes).forEach(([phase, prime]) => {
       this.scores[prime.team] += prime.points;
       
@@ -707,13 +682,11 @@ class Room {
       primes: { ...this.pendingPrimes }
     });
     
-    // Vérifier victoire
     if (this.scores.AB >= this.winScore || this.scores.CD >= this.winScore) {
       const winner = this.scores.AB >= this.winScore ? 'AB' : 'CD';
       return this.endGame(winner);
     }
     
-    // Nouvelle manche
     this.manoPosition = (this.manoPosition + 1) % 4;
     this.phaseResults = {};
     this.phaseWinners = {};
@@ -756,8 +729,6 @@ class Room {
   // ==================== UTILITAIRES ====================
   
   getPlayerTeam(playerId) {
-    // 0=A, 2=B → Équipe AB
-    // 1=C, 3=D → Équipe CD
     return (playerId === 0 || playerId === 2) ? 'AB' : 'CD';
   }
 
@@ -808,7 +779,7 @@ class Room {
       phaseResults: this.phaseResults,
       pendingPrimes: this.pendingPrimes,
       waitingForMus: this.state === 'MUS_DECISION' && !this.musVotes[forPlayerId],
-      needsDiscard: this.state === 'MUS_DISCARD' && this.playerDiscards[forPlayerId]?.length === 0,
+      needsDiscard: this.state === 'MUS_DISCARD' && (!this.playerDiscards[forPlayerId] || this.playerDiscards[forPlayerId].length === 0),
       currentBettor: this.bettingState.currentBettorIndex,
       isMyTurn: this.bettingState.currentBettorIndex === forPlayerId,
       roundHistory: this.roundHistory.slice(-5)
@@ -1097,7 +1068,7 @@ const PORT = process.env.PORT || 3001;
 
 server.listen(PORT, () => {
   console.log('='.repeat(50));
-  console.log(`🎴 Serveur MUS BASQUE Authentique - v3.0`);
+  console.log(`🎴 Serveur MUS BASQUE Authentique - v3.1 BUGFIX`);
   console.log(`🌐 Port: ${PORT}`);
   console.log(`⏰ ${new Date().toISOString()}`);
   console.log('='.repeat(50));
