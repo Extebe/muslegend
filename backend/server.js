@@ -305,12 +305,14 @@ class Room {
     this.currentPhase = phase;
     this.bettingState = {
       currentBettorIndex: this.manoPosition,
+      currentTeam: this.getPlayerTeam(this.manoPosition), // Nouvelle: équipe qui joue
       bets: [],
       baseStake: 0,
       raiseCount: 0,
       hordago: false,
       eliminated: new Set(),
-      allPaso: true
+      allPaso: true,
+      hasImido: false // Nouvelle: pour savoir si IMIDO a été fait
     };
   }
 
@@ -1178,3 +1180,4 @@ process.on('SIGTERM', () => {
 process.on('SIGINT', () => {
   server.close(() => process.exit(0));
 });
+
