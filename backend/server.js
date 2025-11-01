@@ -305,17 +305,21 @@ class Room {
     this.currentPhase = phase;
     this.bettingState = {
       currentBettorIndex: this.manoPosition,
-      currentTeam: this.getPlayerTeam(this.manoPosition), // Nouvelle: équipe qui joue
+      currentTeam: this.getPlayerTeam(this.manoPosition),
       bets: [],
       baseStake: 0,
       raiseCount: 0,
       hordago: false,
       eliminated: new Set(),
       allPaso: true,
-      hasImido: false // Nouvelle: pour savoir si IMIDO a été fait
+      hasImido: false
     };
+    
+    // NOUVEAU: Si c'est un bot qui doit commencer, le faire jouer
+    if (this.botManager.isBot(this.manoPosition)) {
+      this.triggerBotBetting();
+    }
   }
-
   canPlayPairesPhase() {
     const teamABestPaires = this.detectBestPaires(this.getTeamCards('AB'));
     const teamBBestPaires = this.detectBestPaires(this.getTeamCards('CD'));
@@ -1180,4 +1184,5 @@ process.on('SIGTERM', () => {
 process.on('SIGINT', () => {
   server.close(() => process.exit(0));
 });
+
 
